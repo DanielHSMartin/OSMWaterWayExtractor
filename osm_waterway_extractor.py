@@ -1174,6 +1174,28 @@ def get_output_base_filename(input_file: str) -> str:
     return str(Path(input_file).with_suffix(''))
 
 
+def create_test_waterways() -> List[Dict]:
+    """Create synthetic test waterways for validation."""
+    # Create a simple test network: main river with a tributary
+    return [
+        {
+            'id': 1,
+            'coordinates': [(52.5, 13.4), (52.51, 13.41), (52.52, 13.42)],  # Main river
+            'tags': {'waterway': 'river', 'name': 'Test River', 'width': '10 m'}
+        },
+        {
+            'id': 2,
+            'coordinates': [(52.51, 13.41), (52.515, 13.405), (52.52, 13.40)],  # Tributary 
+            'tags': {'waterway': 'stream', 'name': 'Test Stream', 'width': '3 m'}
+        },
+        {
+            'id': 3,
+            'coordinates': [(52.52, 13.42), (52.53, 13.43), (52.54, 13.44)],  # Continuation
+            'tags': {'waterway': 'river', 'name': 'Test River'}
+        }
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract and clean waterway networks from OSM PBF files (v2.1)",
@@ -1192,7 +1214,7 @@ Attribution:
         """
     )
     
-    parser.add_argument('input_file', help='Path to input OSM PBF file')
+    parser.add_argument('input_file', help='Path to input OSM PBF file (use "test" for synthetic test data)')
     parser.add_argument('--config', default='config.yaml',
                         help='Path to YAML configuration file (default: config.yaml)')
     
@@ -1232,9 +1254,13 @@ Attribution:
                    f"min_length={config.min_fragment_length_m}m, "
                    f"precision={config.coordinate_precision}")
         
-        # Step 1: Extract waterways from PBF or cache
-        cache_file = get_cache_filename(args.input_file, config) if config.enable_parameter_based_caching else None
-        waterways = extract_waterways(args.input_file, config, cache_file)
+        # Step 1: Extract waterways from PBF or create test data
+        if args.input_file.lower() == "test":
+            logger.info("Using synthetic test data")
+            waterways = create_test_waterways()
+        else:
+            cache_file = get_cache_filename(args.input_file, config) if config.enable_parameter_based_caching else None
+            waterways = extract_waterways(args.input_file, config, cache_file)
         
         if not waterways:
             logger.warning("No waterways found in the input file")
