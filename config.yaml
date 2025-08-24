@@ -1,0 +1,66 @@
+# Waterway Extraction Configuration v2.1
+# This configuration file defines all parameters for the OSM waterway extraction process
+
+processing:
+  snap_tolerance_m: 2.0                    # Snapping tolerance in meters
+  min_fragment_length_m: 50.0              # Minimum fragment/edge length in meters
+  coordinate_precision: 6                  # Coordinate precision (decimal places, ~0.1m at equator)
+  parallel_workers: 8                      # Number of parallel processes
+  distance_calculation_method: "geodesic"   # geodesic|projected|hybrid
+  waterway_types:                          # OSM waterway types to extract
+    - "river"
+    - "canal"
+    - "stream"  # Optional, can be enabled
+
+clustering:
+  max_displacement_multiplier: 1.5         # Abort if displacement > this × tolerance
+  warning_displacement_multiplier: 1.2     # Warn if displacement > this × tolerance  
+  max_cluster_size_warning: 10             # Warn for clusters larger than this
+  enable_union_find: true                  # Use union-find algorithm for transitive snapping
+
+ids:
+  server_strategy: "deterministic"         # deterministic|sequential
+  mobile_strategy: "sequential"            # sequential (for mobile optimization)
+  hash_function: "xxhash"                  # xxhash|blake2
+  hash_length: 8                           # Characters in hash
+  hash_encoding: "base62"                  # base62|hex
+
+output:
+  server_formats:                          # Server-side output formats
+    - "parquet"
+    - "csv" 
+    - "geojson"
+  mobile_formats:                          # Mobile-optimized formats
+    - "csv"                                # Fallback format
+  mobile_max_chunk_size_mb: 10             # Maximum mobile chunk size
+  compression: true                        # Enable compression
+  include_geodesic_distances: true         # Include accurate distances
+
+qa:
+  enable_comprehensive_metrics: true       # Generate detailed QA metrics
+  distance_validation_samples: 1000       # Number of distance calculations to verify
+  generate_debug_outputs: false           # Generate debug visualization files
+  qa_thresholds:
+    max_unsnapped_near_miss_pct: 0.1      # Maximum % of near-misses not snapped
+    min_width_parse_success_rate: 0.7     # Minimum width parsing success rate
+    max_crossing_edges_pct: 1.0           # Maximum % of crossing edges without nodes
+
+caching:
+  enable_parameter_based_caching: true    # Enable intermediate file caching
+  cache_directory: "./intermediate"       # Directory for intermediate files
+  reuse_extraction: true                  # Reuse waterway extraction when possible
+
+# Test region definitions for rapid testing
+test_regions:
+  test_urban:
+    name: "Dense urban canal network"
+    bbox: [4.8, 52.3, 4.9, 52.4]         # Amsterdam area
+  test_delta:
+    name: "Complex river delta"  
+    bbox: [3.0, 51.5, 4.5, 52.0]         # Rhine delta
+  test_mountain:
+    name: "Sparse mountain streams"
+    bbox: [7.0, 46.0, 8.0, 47.0]         # Swiss Alps
+  test_arctic:
+    name: "High-latitude validation"
+    bbox: [10.0, 68.0, 11.0, 69.0]       # Northern Norway
