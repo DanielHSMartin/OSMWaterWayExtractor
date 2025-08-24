@@ -104,7 +104,7 @@ class Config:
     coordinate_precision: int = 6
     parallel_workers: int = 8
     distance_calculation_method: str = "geodesic"
-    waterway_types: List[str] = None
+    waterway_types: Optional[List[str]] = None
     
     # Clustering parameters
     max_displacement_multiplier: float = 1.5
@@ -120,17 +120,18 @@ class Config:
     hash_encoding: str = "base62"
     
     # Output parameters
-    server_formats: List[str] = None
-    mobile_formats: List[str] = None
+    server_formats: Optional[List[str]] = None
+    mobile_formats: Optional[List[str]] = None
     mobile_max_chunk_size_mb: int = 10
     compression: bool = True
     include_geodesic_distances: bool = True
+    enable_json_gz_format: bool = False
     
     # QA parameters
     enable_comprehensive_metrics: bool = True
     distance_validation_samples: int = 1000
     generate_debug_outputs: bool = False
-    qa_thresholds: Dict[str, float] = None
+    qa_thresholds: Optional[Dict[str, float]] = None
     
     # Caching parameters
     enable_parameter_based_caching: bool = True
@@ -198,7 +199,8 @@ class Config:
                 'mobile_formats': output.get('mobile_formats', ['csv']),
                 'mobile_max_chunk_size_mb': output.get('mobile_max_chunk_size_mb', 10),
                 'compression': output.get('compression', True),
-                'include_geodesic_distances': output.get('include_geodesic_distances', True)
+                'include_geodesic_distances': output.get('include_geodesic_distances', True),
+                'enable_json_gz_format': output.get('enable_json_gz_format', False)
             })
         
         if 'qa' in data:
@@ -310,7 +312,7 @@ class GeodCalculator:
             return self._approximate_distance(coord1, coord2)
     
     def _approximate_distance(self, coord1: Tuple[float, float], coord2: Tuple[float, float]) -> float:
-        """Approximate distance calculation (legacy fallback)."""
+        """Approximate distance calculation (fallback method)."""
         lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
         lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
         
@@ -956,6 +958,10 @@ class OutputManager:
         if "geojson" in self.config.server_formats:
             file_sizes.update(self._save_geojson(edges, base_filename))
         
+        # JSON GZ format if enabled (compatible with original format)
+        if self.config.enable_json_gz_format:
+            file_sizes.update(self._save_json_gz_format(nodes, edges, base_filename))
+        
         # Mobile outputs with sequential IDs
         mobile_nodes, mobile_edges = self._convert_to_mobile_format(nodes, edges, id_generator)
         file_sizes.update(self._save_mobile_csv(mobile_nodes, mobile_edges, base_filename))
@@ -971,6 +977,63 @@ class OutputManager:
         file_sizes[mapping_file] = os.path.getsize(mapping_file)
         
         return file_sizes
+    
+    def _save_json_gz_format(self, nodes: List[Dict], edges: List[Dict], base_filename: str) -> Dict[str, int]:
+        """Save outputs in JSON GZ format (compatible with original format)."""
+        file_sizes = {}
+        
+        # Convert to JSON GZ format
+        json_gz_nodes, json_gz_edges = self._convert_to_json_gz_format(nodes, edges)
+        
+        # Save JSON GZ files
+        nodes_file = f"{base_filename}.nodes.json.gz"
+        edges_file = f"{base_filename}.edges.json.gz"
+        
+        # Save gzipped JSON files exactly like the original script
+        with gzip.open(nodes_file, 'wt', encoding='utf-8') as f:
+            json.dump(json_gz_nodes, f, separators=(',', ':'))  # Compact JSON like original
+        
+        with gzip.open(edges_file, 'wt', encoding='utf-8') as f:
+            json.dump(json_gz_edges, f, separators=(',', ':'))  # Compact JSON like original
+        
+        file_sizes[nodes_file] = os.path.getsize(nodes_file)
+        file_sizes[edges_file] = os.path.getsize(edges_file)
+        
+        logger.info(f"Saved JSON GZ format: {nodes_file} ({file_sizes[nodes_file]:,} bytes)")
+        logger.info(f"Saved JSON GZ format: {edges_file} ({file_sizes[edges_file]:,} bytes)")
+        
+        return file_sizes
+    
+    def _convert_to_json_gz_format(self, nodes: List[Dict], edges: List[Dict]) -> Tuple[List[List[float]], List[Dict]]:
+        """Convert modern format to JSON GZ format exactly matching the original script."""
+        
+        # Create node ID to index mapping
+        node_id_to_index = {}
+        json_gz_nodes = []
+        
+        for i, node in enumerate(nodes):
+            node_id_to_index[node['id']] = i
+            # JSON GZ format: simple [lat, lon] arrays
+            json_gz_nodes.append([node['lat'], node['lon']])
+        
+        # Convert edges to JSON GZ format
+        json_gz_edges = []
+        for edge in edges:
+            # Map modern node IDs to integer indices
+            start_index = node_id_to_index[edge['from_node_id']]
+            end_index = node_id_to_index[edge['to_node_id']]
+            
+            # JSON GZ edge format matches original script exactly
+            json_gz_edge = {
+                'start': start_index,
+                'end': end_index,
+                'length': edge['length_m'],  # Use length_m from modern format
+                'coordinates': edge['coordinates']  # Coordinates should already be [lat, lon] pairs
+            }
+            
+            json_gz_edges.append(json_gz_edge)
+        
+        return json_gz_nodes, json_gz_edges
     
     def _save_parquet(self, nodes: List[Dict], edges: List[Dict], base_filename: str) -> Dict[str, int]:
         """Save nodes and edges as Parquet files."""
@@ -1205,9 +1268,11 @@ Examples:
   python osm_waterway_extractor.py brazil-latest.osm.pbf
   python osm_waterway_extractor.py data.osm.pbf --config custom_config.yaml
   python osm_waterway_extractor.py data.osm.pbf --snap-tolerance 5.0 --precision 6
+  python osm_waterway_extractor.py data.osm.pbf --enable-json-gz-format
 
 Configuration:
   Uses config.yaml by default. Command line options override config file settings.
+  JSON GZ format can be enabled in config.yaml or with --enable-json-gz-format.
 
 Attribution:
   © OpenStreetMap contributors. Data licensed under ODbL.
@@ -1227,6 +1292,8 @@ Attribution:
                         help='Coordinate precision in decimal places (overrides config)')
     parser.add_argument('--no-cache', action='store_true',
                         help='Disable caching and force re-extraction')
+    parser.add_argument('--enable-json-gz-format', action='store_true',
+                        help='Enable JSON GZ format output (two gzipped JSON files) for compatibility (overrides config)')
     
     args = parser.parse_args()
     
@@ -1249,6 +1316,8 @@ Attribution:
         if args.no_cache:
             config.enable_parameter_based_caching = False
             config.reuse_extraction = False
+        if args.enable_json_gz_format:
+            config.enable_json_gz_format = True
         
         logger.info(f"Configuration: snap_tolerance={config.snap_tolerance_m}m, "
                    f"min_length={config.min_fragment_length_m}m, "
@@ -1273,6 +1342,7 @@ Attribution:
         # Step 3: Save outputs in multiple formats
         base_filename = get_output_base_filename(args.input_file)
         output_manager = OutputManager(config)
+        
         file_sizes = output_manager.save_outputs(nodes, edges, base_filename, 
                                                 graph_builder.qa_metrics, graph_builder.id_generator)
         
@@ -1297,14 +1367,21 @@ Attribution:
         print(f"  Min edge length: {config.min_fragment_length_m}m")
         print(f"  Coordinate precision: {config.coordinate_precision} decimal places")
         print(f"  Distance calculation: {config.distance_calculation_method}")
+        
+        if config.enable_json_gz_format:
+            print(f"  JSON GZ format: Enabled (compatible with original format)")
+        
         print(f"\nQuality Metrics:")
         print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
         print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
         print(f"  Mean edge length: {graph_builder.qa_metrics.get('mean_edge_length_m', 0):.1f}m")
+        
         print(f"\nOutput files:")
         for filename, size in file_sizes.items():
             print(f"  {filename} ({size:,} bytes)")
+        
         print(f"  {manifest_file} (manifest)")
+        
         total_size = sum(file_sizes.values())
         print(f"  Total size: {total_size:,} bytes")
         print("="*60)
