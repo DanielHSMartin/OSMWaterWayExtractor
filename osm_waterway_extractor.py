@@ -972,6 +972,63 @@ class OutputManager:
         
         return file_sizes
     
+    def save_legacy_format(self, nodes: List[Dict], edges: List[Dict], base_filename: str) -> Dict[str, int]:
+        """Save outputs in legacy format (two gzipped JSON files) for compatibility."""
+        file_sizes = {}
+        
+        # Convert to legacy format
+        legacy_nodes, legacy_edges = self._convert_to_legacy_format(nodes, edges)
+        
+        # Save legacy files
+        nodes_file = f"{base_filename}.nodes.json.gz"
+        edges_file = f"{base_filename}.edges.json.gz"
+        
+        # Save gzipped JSON files exactly like the original script
+        with gzip.open(nodes_file, 'wt', encoding='utf-8') as f:
+            json.dump(legacy_nodes, f, separators=(',', ':'))  # Compact JSON like original
+        
+        with gzip.open(edges_file, 'wt', encoding='utf-8') as f:
+            json.dump(legacy_edges, f, separators=(',', ':'))  # Compact JSON like original
+        
+        file_sizes[nodes_file] = os.path.getsize(nodes_file)
+        file_sizes[edges_file] = os.path.getsize(edges_file)
+        
+        logger.info(f"Saved legacy format: {nodes_file} ({file_sizes[nodes_file]:,} bytes)")
+        logger.info(f"Saved legacy format: {edges_file} ({file_sizes[edges_file]:,} bytes)")
+        
+        return file_sizes
+    
+    def _convert_to_legacy_format(self, nodes: List[Dict], edges: List[Dict]) -> Tuple[List[List[float]], List[Dict]]:
+        """Convert modern format to legacy format exactly matching the original script."""
+        
+        # Create node ID to index mapping
+        node_id_to_index = {}
+        legacy_nodes = []
+        
+        for i, node in enumerate(nodes):
+            node_id_to_index[node['id']] = i
+            # Legacy format: simple [lat, lon] arrays
+            legacy_nodes.append([node['lat'], node['lon']])
+        
+        # Convert edges to legacy format
+        legacy_edges = []
+        for edge in edges:
+            # Map modern node IDs to legacy integer indices
+            start_index = node_id_to_index[edge['from_node_id']]
+            end_index = node_id_to_index[edge['to_node_id']]
+            
+            # Legacy edge format matches original script exactly
+            legacy_edge = {
+                'start': start_index,
+                'end': end_index,
+                'length': edge['length_m'],  # Use length_m from modern format
+                'coordinates': edge['coordinates']  # Coordinates should already be [lat, lon] pairs
+            }
+            
+            legacy_edges.append(legacy_edge)
+        
+        return legacy_nodes, legacy_edges
+    
     def _save_parquet(self, nodes: List[Dict], edges: List[Dict], base_filename: str) -> Dict[str, int]:
         """Save nodes and edges as Parquet files."""
         nodes_file = f"{base_filename}.nodes.parquet"
@@ -1227,6 +1284,8 @@ Attribution:
                         help='Coordinate precision in decimal places (overrides config)')
     parser.add_argument('--no-cache', action='store_true',
                         help='Disable caching and force re-extraction')
+    parser.add_argument('--legacy-format', action='store_true',
+                        help='Output in legacy format (two gzipped JSON files) for compatibility with existing apps')
     
     args = parser.parse_args()
     
@@ -1273,15 +1332,21 @@ Attribution:
         # Step 3: Save outputs in multiple formats
         base_filename = get_output_base_filename(args.input_file)
         output_manager = OutputManager(config)
-        file_sizes = output_manager.save_outputs(nodes, edges, base_filename, 
-                                                graph_builder.qa_metrics, graph_builder.id_generator)
         
-        # Step 4: Generate manifest
-        manifest = ManifestGenerator.generate_manifest(args.input_file, config, 
-                                                      graph_builder.qa_metrics, file_sizes)
-        manifest_file = f"{base_filename}.manifest.json"
-        with open(manifest_file, 'w') as f:
-            json.dump(manifest, f, indent=2)
+        if args.legacy_format:
+            logger.info("Using legacy output format for compatibility")
+            file_sizes = output_manager.save_legacy_format(nodes, edges, base_filename)
+        else:
+            file_sizes = output_manager.save_outputs(nodes, edges, base_filename, 
+                                                    graph_builder.qa_metrics, graph_builder.id_generator)
+        
+        # Step 4: Generate manifest (skip for legacy format)
+        if not args.legacy_format:
+            manifest = ManifestGenerator.generate_manifest(args.input_file, config, 
+                                                          graph_builder.qa_metrics, file_sizes)
+            manifest_file = f"{base_filename}.manifest.json"
+            with open(manifest_file, 'w') as f:
+                json.dump(manifest, f, indent=2)
         
         # Print summary
         print("\n" + "="*60)
@@ -1297,14 +1362,22 @@ Attribution:
         print(f"  Min edge length: {config.min_fragment_length_m}m")
         print(f"  Coordinate precision: {config.coordinate_precision} decimal places")
         print(f"  Distance calculation: {config.distance_calculation_method}")
-        print(f"\nQuality Metrics:")
-        print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
-        print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
-        print(f"  Mean edge length: {graph_builder.qa_metrics.get('mean_edge_length_m', 0):.1f}m")
+        
+        if args.legacy_format:
+            print(f"  Output format: Legacy (compatible with existing apps)")
+        else:
+            print(f"\nQuality Metrics:")
+            print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
+            print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
+            print(f"  Mean edge length: {graph_builder.qa_metrics.get('mean_edge_length_m', 0):.1f}m")
+        
         print(f"\nOutput files:")
         for filename, size in file_sizes.items():
             print(f"  {filename} ({size:,} bytes)")
-        print(f"  {manifest_file} (manifest)")
+        
+        if not args.legacy_format:
+            print(f"  {manifest_file} (manifest)")
+        
         total_size = sum(file_sizes.values())
         print(f"  Total size: {total_size:,} bytes")
         print("="*60)
