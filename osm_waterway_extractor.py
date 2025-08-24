@@ -125,6 +125,7 @@ class Config:
     mobile_max_chunk_size_mb: int = 10
     compression: bool = True
     include_geodesic_distances: bool = True
+    enable_legacy_format: bool = False
     
     # QA parameters
     enable_comprehensive_metrics: bool = True
@@ -198,7 +199,8 @@ class Config:
                 'mobile_formats': output.get('mobile_formats', ['csv']),
                 'mobile_max_chunk_size_mb': output.get('mobile_max_chunk_size_mb', 10),
                 'compression': output.get('compression', True),
-                'include_geodesic_distances': output.get('include_geodesic_distances', True)
+                'include_geodesic_distances': output.get('include_geodesic_distances', True),
+                'enable_legacy_format': output.get('enable_legacy_format', False)
             })
         
         if 'qa' in data:
@@ -956,6 +958,10 @@ class OutputManager:
         if "geojson" in self.config.server_formats:
             file_sizes.update(self._save_geojson(edges, base_filename))
         
+        # Legacy format if enabled
+        if self.config.enable_legacy_format:
+            file_sizes.update(self._save_legacy_format(nodes, edges, base_filename))
+        
         # Mobile outputs with sequential IDs
         mobile_nodes, mobile_edges = self._convert_to_mobile_format(nodes, edges, id_generator)
         file_sizes.update(self._save_mobile_csv(mobile_nodes, mobile_edges, base_filename))
@@ -972,7 +978,7 @@ class OutputManager:
         
         return file_sizes
     
-    def save_legacy_format(self, nodes: List[Dict], edges: List[Dict], base_filename: str) -> Dict[str, int]:
+    def _save_legacy_format(self, nodes: List[Dict], edges: List[Dict], base_filename: str) -> Dict[str, int]:
         """Save outputs in legacy format (two gzipped JSON files) for compatibility."""
         file_sizes = {}
         
@@ -1262,9 +1268,11 @@ Examples:
   python osm_waterway_extractor.py brazil-latest.osm.pbf
   python osm_waterway_extractor.py data.osm.pbf --config custom_config.yaml
   python osm_waterway_extractor.py data.osm.pbf --snap-tolerance 5.0 --precision 6
+  python osm_waterway_extractor.py data.osm.pbf --enable-legacy-format
 
 Configuration:
   Uses config.yaml by default. Command line options override config file settings.
+  Legacy format can be enabled in config.yaml or with --enable-legacy-format.
 
 Attribution:
   © OpenStreetMap contributors. Data licensed under ODbL.
@@ -1284,8 +1292,8 @@ Attribution:
                         help='Coordinate precision in decimal places (overrides config)')
     parser.add_argument('--no-cache', action='store_true',
                         help='Disable caching and force re-extraction')
-    parser.add_argument('--legacy-format', action='store_true',
-                        help='Output in legacy format (two gzipped JSON files) for compatibility with existing apps')
+    parser.add_argument('--enable-legacy-format', action='store_true',
+                        help='Enable legacy format output (two gzipped JSON files) for compatibility (overrides config)')
     
     args = parser.parse_args()
     
@@ -1308,6 +1316,8 @@ Attribution:
         if args.no_cache:
             config.enable_parameter_based_caching = False
             config.reuse_extraction = False
+        if args.enable_legacy_format:
+            config.enable_legacy_format = True
         
         logger.info(f"Configuration: snap_tolerance={config.snap_tolerance_m}m, "
                    f"min_length={config.min_fragment_length_m}m, "
@@ -1333,20 +1343,15 @@ Attribution:
         base_filename = get_output_base_filename(args.input_file)
         output_manager = OutputManager(config)
         
-        if args.legacy_format:
-            logger.info("Using legacy output format for compatibility")
-            file_sizes = output_manager.save_legacy_format(nodes, edges, base_filename)
-        else:
-            file_sizes = output_manager.save_outputs(nodes, edges, base_filename, 
-                                                    graph_builder.qa_metrics, graph_builder.id_generator)
+        file_sizes = output_manager.save_outputs(nodes, edges, base_filename, 
+                                                graph_builder.qa_metrics, graph_builder.id_generator)
         
-        # Step 4: Generate manifest (skip for legacy format)
-        if not args.legacy_format:
-            manifest = ManifestGenerator.generate_manifest(args.input_file, config, 
-                                                          graph_builder.qa_metrics, file_sizes)
-            manifest_file = f"{base_filename}.manifest.json"
-            with open(manifest_file, 'w') as f:
-                json.dump(manifest, f, indent=2)
+        # Step 4: Generate manifest
+        manifest = ManifestGenerator.generate_manifest(args.input_file, config, 
+                                                      graph_builder.qa_metrics, file_sizes)
+        manifest_file = f"{base_filename}.manifest.json"
+        with open(manifest_file, 'w') as f:
+            json.dump(manifest, f, indent=2)
         
         # Print summary
         print("\n" + "="*60)
@@ -1363,20 +1368,19 @@ Attribution:
         print(f"  Coordinate precision: {config.coordinate_precision} decimal places")
         print(f"  Distance calculation: {config.distance_calculation_method}")
         
-        if args.legacy_format:
-            print(f"  Output format: Legacy (compatible with existing apps)")
-        else:
-            print(f"\nQuality Metrics:")
-            print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
-            print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
-            print(f"  Mean edge length: {graph_builder.qa_metrics.get('mean_edge_length_m', 0):.1f}m")
+        if config.enable_legacy_format:
+            print(f"  Legacy format: Enabled (compatible with existing apps)")
+        
+        print(f"\nQuality Metrics:")
+        print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
+        print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
+        print(f"  Mean edge length: {graph_builder.qa_metrics.get('mean_edge_length_m', 0):.1f}m")
         
         print(f"\nOutput files:")
         for filename, size in file_sizes.items():
             print(f"  {filename} ({size:,} bytes)")
         
-        if not args.legacy_format:
-            print(f"  {manifest_file} (manifest)")
+        print(f"  {manifest_file} (manifest)")
         
         total_size = sum(file_sizes.values())
         print(f"  Total size: {total_size:,} bytes")

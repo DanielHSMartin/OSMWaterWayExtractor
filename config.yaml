@@ -35,6 +35,7 @@ output:
   mobile_max_chunk_size_mb: 10             # Maximum mobile chunk size
   compression: true                        # Enable compression
   include_geodesic_distances: true         # Include accurate distances
+  enable_legacy_format: false              # Enable legacy JSON.gz format for compatibility
 
 qa:
   enable_comprehensive_metrics: true       # Generate detailed QA metrics
