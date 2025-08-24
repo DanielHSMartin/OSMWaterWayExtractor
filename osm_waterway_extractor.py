@@ -28,7 +28,7 @@ import time
 import hashlib
 from pathlib import Path
 from collections import Counter, defaultdict
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Tuple, Optional, Any, Set
 import logging
 import concurrent.futures
@@ -104,7 +104,7 @@ class Config:
     coordinate_precision: int = 6
     parallel_workers: int = 8
     distance_calculation_method: str = "geodesic"
-    waterway_types: Optional[List[str]] = None
+    waterway_types: List[str] = field(default_factory=lambda: ["river", "canal"])
     
     # Clustering parameters
     max_displacement_multiplier: float = 1.5
@@ -120,8 +120,8 @@ class Config:
     hash_encoding: str = "base62"
     
     # Output parameters
-    server_formats: Optional[List[str]] = None
-    mobile_formats: Optional[List[str]] = None
+    server_formats: List[str] = field(default_factory=lambda: ["parquet", "csv", "geojson"])
+    mobile_formats: List[str] = field(default_factory=lambda: ["csv"])
     mobile_max_chunk_size_mb: int = 10
     compression: bool = True
     include_geodesic_distances: bool = True
@@ -131,7 +131,11 @@ class Config:
     enable_comprehensive_metrics: bool = True
     distance_validation_samples: int = 1000
     generate_debug_outputs: bool = False
-    qa_thresholds: Optional[Dict[str, float]] = None
+    qa_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        "max_unsnapped_near_miss_pct": 0.1,
+        "min_width_parse_success_rate": 0.7,
+        "max_crossing_edges_pct": 1.0
+    })
     
     # Caching parameters
     enable_parameter_based_caching: bool = True
