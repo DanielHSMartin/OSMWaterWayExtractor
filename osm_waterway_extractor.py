@@ -239,6 +239,97 @@ class Config:
         # Create a deterministic string representation of config
         config_str = json.dumps(asdict(self), sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()[:16]
+    
+    def get_step_parameter_hash(self, step_name: str) -> str:
+        """Generate a hash of configuration parameters relevant to a specific processing step."""
+        step_params = {}
+        
+        if step_name == "extraction":
+            # Only parameters that affect waterway extraction
+            step_params = {
+                'waterway_types': self.waterway_types,
+            }
+        elif step_name == "processed":
+            # Parameters that affect waterway processing
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+            }
+        elif step_name == "simplified":
+            # Parameters that affect geometry simplification (depends on processed)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+            }
+        elif step_name == "endpoints":
+            # Parameters that affect endpoint extraction (depends on simplified)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+            }
+        elif step_name == "clustering":
+            # Parameters that affect clustering (depends on endpoints)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+                'snap_tolerance_m': self.snap_tolerance_m,
+                'max_displacement_multiplier': self.max_displacement_multiplier,
+                'warning_displacement_multiplier': self.warning_displacement_multiplier,
+                'enable_union_find': self.enable_union_find,
+                'distance_calculation_method': self.distance_calculation_method,
+            }
+        elif step_name == "edges":
+            # Parameters that affect edge creation (depends on clustering)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+                'snap_tolerance_m': self.snap_tolerance_m,
+                'max_displacement_multiplier': self.max_displacement_multiplier,
+                'warning_displacement_multiplier': self.warning_displacement_multiplier,
+                'enable_union_find': self.enable_union_find,
+                'distance_calculation_method': self.distance_calculation_method,
+                'include_geodesic_distances': self.include_geodesic_distances,
+            }
+        elif step_name == "nodes":
+            # Parameters that affect node creation (depends on edges)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+                'snap_tolerance_m': self.snap_tolerance_m,
+                'max_displacement_multiplier': self.max_displacement_multiplier,
+                'warning_displacement_multiplier': self.warning_displacement_multiplier,
+                'enable_union_find': self.enable_union_find,
+                'distance_calculation_method': self.distance_calculation_method,
+                'include_geodesic_distances': self.include_geodesic_distances,
+                'server_strategy': self.server_strategy,
+                'mobile_strategy': self.mobile_strategy,
+                'hash_function': self.hash_function,
+                'hash_length': self.hash_length,
+                'hash_encoding': self.hash_encoding,
+            }
+        else:
+            # Fallback to all parameters
+            step_params = asdict(self)
+        
+        # Create a deterministic string representation of step-specific config
+        config_str = json.dumps(step_params, sort_keys=True)
+        return hashlib.sha256(config_str.encode()).hexdigest()[:16]
 
 
 class UnionFind:
@@ -1355,8 +1446,9 @@ class ManifestGenerator:
 def get_cache_filename(input_file: str, config: Config) -> str:
     """Generate cache filename based on input file and configuration."""
     base_name = Path(input_file).stem
-    param_hash = config.get_parameter_hash()
-    cache_dir = Path(config.cache_directory) / "extraction" / param_hash
+    # Use extraction-specific parameter hash for selective cache reuse
+    extraction_param_hash = config.get_step_parameter_hash("extraction")
+    cache_dir = Path(config.cache_directory) / "extraction" / extraction_param_hash
     cache_dir.mkdir(parents=True, exist_ok=True)
     return str(cache_dir / f"{base_name}.waterways.json.gz")
 
@@ -1364,8 +1456,9 @@ def get_cache_filename(input_file: str, config: Config) -> str:
 def get_intermediate_cache_filename(input_file: str, config: Config, step_name: str) -> str:
     """Generate intermediate cache filename for a specific processing step."""
     base_name = Path(input_file).stem
-    param_hash = config.get_parameter_hash()
-    cache_dir = Path(config.cache_directory) / "intermediate" / param_hash
+    # Use step-specific parameter hash for selective cache reuse
+    step_param_hash = config.get_step_parameter_hash(step_name)
+    cache_dir = Path(config.cache_directory) / "intermediate" / step_param_hash
     cache_dir.mkdir(parents=True, exist_ok=True)
     return str(cache_dir / f"{base_name}.{step_name}.json.gz")
 
@@ -1416,6 +1509,21 @@ def load_intermediate_cache(cache_file: str) -> Any:
                 converted_data[key] = value
         data = converted_data
     
+    # Convert coordinate lists back to tuples in lists/values
+    def convert_coords_to_tuples(obj):
+        if isinstance(obj, list):
+            # Check if this is a coordinate pair [lat, lon]
+            if len(obj) == 2 and all(isinstance(x, (int, float)) for x in obj):
+                return tuple(obj)
+            else:
+                # Process each item in the list
+                return [convert_coords_to_tuples(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: convert_coords_to_tuples(v) for k, v in obj.items()}
+        else:
+            return obj
+    
+    data = convert_coords_to_tuples(data)
     return data
 
 
