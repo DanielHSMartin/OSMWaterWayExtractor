@@ -522,17 +522,19 @@ def _process_waterway_batch_for_edges(args):
     
     return all_edges
 
-def _optimize_coord_mapping_for_multiprocessing(coord_mapping):
+def _optimize_coord_mapping_for_multiprocessing(coord_mapping, config_dict):
     """Convert coordinate mapping to a more efficient format for multiprocessing"""
+    # Get precision from config to ensure consistency
+    precision = config_dict.get('coordinate_precision', 6)
+    
     # Convert to a format that serializes more efficiently
     optimized_mapping = {}
     
     for coord, mapped_coord in coord_mapping.items():
-        # Only include mappings that actually change coordinates
-        if coord != mapped_coord:
-            key = f"{coord[0]:.6f},{coord[1]:.6f}"
-            value = f"{mapped_coord[0]:.6f},{mapped_coord[1]:.6f}"
-            optimized_mapping[key] = value
+        # Include ALL mappings using the correct precision
+        key = f"{coord[0]:.{precision}f},{coord[1]:.{precision}f}"
+        value = f"{mapped_coord[0]:.{precision}f},{mapped_coord[1]:.{precision}f}"
+        optimized_mapping[key] = value
     
     return optimized_mapping
 
@@ -554,14 +556,8 @@ def _process_waterway_batch_optimized(args):
     # Restore coordinate mapping
     coord_mapping = _restore_coord_mapping(optimized_coord_mapping)
     
-    # Add identity mappings for coordinates not in the optimized mapping
-    all_coords = set()
-    for waterway in waterway_batch:
-        all_coords.update(waterway['coordinates'])
-    
-    for coord in all_coords:
-        if coord not in coord_mapping:
-            coord_mapping[coord] = coord
+    # No need to add identity mappings since they're already included
+    # The original code was adding duplicate identity mappings which corrupted the junction detection
     
     # Process using the batch function
     batch_args = (waterway_batch, coord_mapping, config_dict)
@@ -1863,7 +1859,7 @@ class ModernWaterwayGraphBuilder:
         }
         
         # Optimize coordinate mapping for more efficient serialization
-        optimized_coord_mapping = _optimize_coord_mapping_for_multiprocessing(coord_mapping)
+        optimized_coord_mapping = _optimize_coord_mapping_for_multiprocessing(coord_mapping, config_dict)
         
         # Use smaller batches for better parallelization and less memory usage per process
         batch_size = max(1, len(waterways) // (self.config.parallel_workers * 2))
