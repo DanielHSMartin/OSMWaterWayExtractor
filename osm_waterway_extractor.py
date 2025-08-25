@@ -106,6 +106,10 @@ class Config:
     distance_calculation_method: str = "geodesic"
     waterway_types: List[str] = field(default_factory=lambda: ["river", "canal"])
     
+    # Geometry simplification parameters
+    enable_geometry_simplification: bool = True
+    simplification_tolerance_m: float = 1.0
+    
     # Clustering parameters
     max_displacement_multiplier: float = 1.5
     warning_displacement_multiplier: float = 1.2
@@ -172,7 +176,9 @@ class Config:
                 'coordinate_precision': processing.get('coordinate_precision', 6),
                 'parallel_workers': processing.get('parallel_workers', 8),
                 'distance_calculation_method': processing.get('distance_calculation_method', 'geodesic'),
-                'waterway_types': processing.get('waterway_types', ['river', 'canal'])
+                'waterway_types': processing.get('waterway_types', ['river', 'canal']),
+                'enable_geometry_simplification': processing.get('enable_geometry_simplification', True),
+                'simplification_tolerance_m': processing.get('simplification_tolerance_m', 1.0)
             })
         
         if 'clustering' in data:
@@ -659,7 +665,7 @@ class ModernWaterwayGraphBuilder:
         self.clusterer = SnappingClusterer(config, self.geod_calc)
         self.qa_metrics = {}
         
-    def build_graph(self, waterways: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    def build_graph(self, waterways: List[Dict], input_file: str = "unknown") -> Tuple[List[Dict], List[Dict]]:
         """Build a waterway graph from extracted waterway data."""
         logger.info(f"Building graph from {len(waterways)} waterways using v2.1 specification...")
         
@@ -667,27 +673,74 @@ class ModernWaterwayGraphBuilder:
         
         # Step 1: Process and clean waterway coordinates
         logger.info("Step 1: Processing and cleaning waterway coordinates...")
-        processed_waterways = self._process_waterways(waterways)
+        processed_cache_file = get_intermediate_cache_filename(input_file, self.config, "processed") if self.config.enable_parameter_based_caching else None
+        
+        if processed_cache_file and os.path.exists(processed_cache_file):
+            processed_waterways = load_intermediate_cache(processed_cache_file)
+        else:
+            processed_waterways = self._process_waterways(waterways)
+            if processed_cache_file:
+                save_intermediate_cache(processed_waterways, processed_cache_file)
+        
+        # Step 1.5: Simplify geometries (new step)
+        logger.info("Step 1.5: Simplifying waterway geometries...")
+        simplified_cache_file = get_intermediate_cache_filename(input_file, self.config, "simplified") if self.config.enable_parameter_based_caching else None
+        
+        if simplified_cache_file and os.path.exists(simplified_cache_file):
+            simplified_waterways = load_intermediate_cache(simplified_cache_file)
+        else:
+            simplified_waterways = self._simplify_geometries(processed_waterways)
+            if simplified_cache_file:
+                save_intermediate_cache(simplified_waterways, simplified_cache_file)
         
         # Step 2: Extract all unique endpoints and junctions
         logger.info("Step 2: Extracting endpoints and identifying junctions...")
-        endpoints, junctions = self._extract_endpoints_and_junctions(processed_waterways)
+        endpoints_cache_file = get_intermediate_cache_filename(input_file, self.config, "endpoints") if self.config.enable_parameter_based_caching else None
+        
+        if endpoints_cache_file and os.path.exists(endpoints_cache_file):
+            cached_data = load_intermediate_cache(endpoints_cache_file)
+            endpoints, junctions = cached_data['endpoints'], cached_data['junctions']
+        else:
+            endpoints, junctions = self._extract_endpoints_and_junctions(simplified_waterways)
+            if endpoints_cache_file:
+                save_intermediate_cache({'endpoints': endpoints, 'junctions': junctions}, endpoints_cache_file)
         
         # Step 3: Snap and cluster endpoints using union-find
         logger.info("Step 3: Snapping and clustering endpoints...")
-        coord_mapping = self.clusterer.cluster_endpoints(endpoints + junctions)
+        clustering_cache_file = get_intermediate_cache_filename(input_file, self.config, "clustering") if self.config.enable_parameter_based_caching else None
+        
+        if clustering_cache_file and os.path.exists(clustering_cache_file):
+            coord_mapping = load_intermediate_cache(clustering_cache_file)
+        else:
+            coord_mapping = self.clusterer.cluster_endpoints(endpoints + junctions)
+            if clustering_cache_file:
+                save_intermediate_cache(coord_mapping, clustering_cache_file)
         
         # Step 4: Create edges with accurate distance calculations
         logger.info("Step 4: Creating edges with geodesic distances...")
-        edges = self._create_edges(processed_waterways, coord_mapping)
+        edges_cache_file = get_intermediate_cache_filename(input_file, self.config, "edges") if self.config.enable_parameter_based_caching else None
+        
+        if edges_cache_file and os.path.exists(edges_cache_file):
+            edges = load_intermediate_cache(edges_cache_file)
+        else:
+            edges = self._create_edges(simplified_waterways, coord_mapping)
+            if edges_cache_file:
+                save_intermediate_cache(edges, edges_cache_file)
         
         # Step 5: Build final node list with deterministic IDs
         logger.info("Step 5: Building node list with deterministic IDs...")
-        nodes = self._build_nodes(coord_mapping)
+        nodes_cache_file = get_intermediate_cache_filename(input_file, self.config, "nodes") if self.config.enable_parameter_based_caching else None
+        
+        if nodes_cache_file and os.path.exists(nodes_cache_file):
+            nodes = load_intermediate_cache(nodes_cache_file)
+        else:
+            nodes = self._build_nodes(coord_mapping)
+            if nodes_cache_file:
+                save_intermediate_cache(nodes, nodes_cache_file)
         
         # Step 6: Generate QA metrics
         logger.info("Step 6: Generating QA metrics...")
-        self._generate_qa_metrics(waterways, processed_waterways, nodes, edges, time.time() - start_time)
+        self._generate_qa_metrics(waterways, simplified_waterways, nodes, edges, time.time() - start_time)
         
         logger.info(f"Graph built: {len(nodes)} nodes, {len(edges)} edges in {time.time() - start_time:.2f}s")
         
@@ -724,6 +777,51 @@ class ModernWaterwayGraphBuilder:
                 
         logger.info(f"Processed {len(processed)}/{len(waterways)} waterways after coordinate cleaning")
         return processed
+    
+    def _simplify_geometries(self, waterways: List[Dict]) -> List[Dict]:
+        """Simplify waterway geometries to reduce size while preserving topology."""
+        if not self.config.enable_geometry_simplification:
+            logger.info("Geometry simplification disabled, skipping...")
+            return waterways
+            
+        logger.info(f"Simplifying geometries with tolerance {self.config.simplification_tolerance_m}m")
+        simplified = []
+        
+        for waterway in waterways:
+            coords = waterway['coordinates']
+            if len(coords) < 2:
+                continue
+                
+            try:
+                # Convert to LineString
+                line = LineString([(lon, lat) for lat, lon in coords])
+                
+                # Calculate simplification tolerance in degrees (rough approximation)
+                # 1 meter ≈ 0.00001 degrees at equator
+                tolerance_degrees = self.config.simplification_tolerance_m * 0.00001
+                
+                # Simplify the geometry
+                simplified_line = line.simplify(tolerance_degrees, preserve_topology=True)
+                
+                # Convert back to coordinates
+                if simplified_line.geom_type == 'LineString':
+                    simplified_coords = [(lat, lon) for lon, lat in simplified_line.coords]
+                    
+                    # Ensure we still have at least 2 points
+                    if len(simplified_coords) >= 2:
+                        simplified.append({
+                            'id': waterway['id'],
+                            'coordinates': simplified_coords,
+                            'tags': waterway['tags']
+                        })
+                        
+            except Exception as e:
+                logger.debug(f"Error simplifying waterway {waterway['id']}: {e}")
+                # Fall back to original if simplification fails
+                simplified.append(waterway)
+        
+        logger.info(f"Simplified {len(simplified)}/{len(waterways)} waterways")
+        return simplified
     
     def _extract_endpoints_and_junctions(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract unique endpoints and identify junction points."""
@@ -1263,6 +1361,64 @@ def get_cache_filename(input_file: str, config: Config) -> str:
     return str(cache_dir / f"{base_name}.waterways.json.gz")
 
 
+def get_intermediate_cache_filename(input_file: str, config: Config, step_name: str) -> str:
+    """Generate intermediate cache filename for a specific processing step."""
+    base_name = Path(input_file).stem
+    param_hash = config.get_parameter_hash()
+    cache_dir = Path(config.cache_directory) / "intermediate" / param_hash
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return str(cache_dir / f"{base_name}.{step_name}.json.gz")
+
+
+def save_intermediate_cache(data: Any, cache_file: str):
+    """Save intermediate data to cache file."""
+    logger.info(f"Saving intermediate data to cache: {cache_file}")
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    
+    # Convert coordinate tuples to strings for JSON serialization
+    if isinstance(data, dict):
+        serializable_data = {}
+        for key, value in data.items():
+            if isinstance(key, tuple):
+                # Convert tuple key to string
+                str_key = f"{key[0]},{key[1]}"
+                serializable_data[str_key] = value
+            else:
+                serializable_data[key] = value
+        data = serializable_data
+    
+    with gzip.open(cache_file, 'wt', encoding='utf-8') as f:
+        json.dump(data, f)
+
+
+def load_intermediate_cache(cache_file: str) -> Any:
+    """Load intermediate data from cache file."""
+    logger.info(f"Loading intermediate data from cache: {cache_file}")
+    with gzip.open(cache_file, 'rt', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    # Convert string keys back to coordinate tuples if needed
+    if isinstance(data, dict):
+        converted_data = {}
+        for key, value in data.items():
+            if isinstance(key, str) and ',' in key:
+                try:
+                    # Try to convert string back to tuple
+                    parts = key.split(',')
+                    if len(parts) == 2:
+                        coord_tuple = (float(parts[0]), float(parts[1]))
+                        converted_data[coord_tuple] = value
+                    else:
+                        converted_data[key] = value
+                except ValueError:
+                    converted_data[key] = value
+            else:
+                converted_data[key] = value
+        data = converted_data
+    
+    return data
+
+
 def get_output_base_filename(input_file: str) -> str:
     """Generate base filename for outputs, including directory structure."""
     input_path = Path(input_file)
@@ -1380,7 +1536,7 @@ Attribution:
         
         # Step 2: Build graph using modern architecture
         graph_builder = ModernWaterwayGraphBuilder(config)
-        nodes, edges = graph_builder.build_graph(waterways)
+        nodes, edges = graph_builder.build_graph(waterways, args.input_file)
         
         # Step 3: Save outputs in multiple formats
         base_filename = get_output_base_filename(args.input_file)

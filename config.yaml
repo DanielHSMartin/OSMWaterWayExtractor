@@ -36,6 +36,16 @@ processing:
     - "river"
     - "canal"
 
+  # Enable geometry simplification (boolean)
+  # options: true|false
+  # explanation: whether to simplify waterway geometries to reduce size
+  enable_geometry_simplification: true
+
+  # Geometry simplification tolerance in meters (float)
+  # options: any positive float (typical: 0.5, 1.0, 2.0, 5.0)
+  # explanation: maximum distance to move vertices during simplification
+  simplification_tolerance_m: 1.0
+
 clustering:
   # Maximum allowed displacement multiplier relative to snap_tolerance_m (float)
   # options: >1.0 (e.g., 1.0..10.0)
