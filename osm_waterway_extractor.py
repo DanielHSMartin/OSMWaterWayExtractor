@@ -1410,7 +1410,8 @@ class ModernWaterwayGraphBuilder:
     def _process_waterways(self, waterways: List[Dict]) -> List[Dict]:
         """Process waterway coordinates and apply coordinate precision."""
         # Use parallel processing for better performance with large datasets
-        if self.config.parallel_workers > 1 and len(waterways) > 1000:
+        # Based on performance analysis: break-even point is around 500 waterways
+        if self.config.parallel_workers > 1 and len(waterways) > 500:
             logger.info(f"Processing {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
             # Try multiprocessing first for better CPU utilization
             try:
@@ -1702,7 +1703,8 @@ class ModernWaterwayGraphBuilder:
     def _extract_endpoints_and_junctions(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract unique endpoints and identify junction points."""
         # Use parallel processing for better performance with large datasets
-        if self.config.parallel_workers > 1 and len(waterways) > 1000:
+        # Based on performance analysis: break-even point is around 500 waterways
+        if self.config.parallel_workers > 1 and len(waterways) > 500:
             logger.info(f"Extracting endpoints from {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
             # Try multiprocessing first for better CPU utilization
             try:
@@ -1837,7 +1839,9 @@ class ModernWaterwayGraphBuilder:
     def _create_edges(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
         """Create edges with accurate geodesic distances and deterministic IDs."""
         # Use parallel processing for better performance
-        if self.config.parallel_workers > 1 and len(waterways) > 100:
+        # Based on performance analysis: multiprocessing overhead makes it slower for small datasets
+        # Break-even point is around 500 waterways, so use 500 as threshold
+        if self.config.parallel_workers > 1 and len(waterways) > 500:
             logger.info(f"Processing {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
             # Try ProcessPoolExecutor for CPU-intensive tasks, fall back to ThreadPoolExecutor
             try:
