@@ -50,12 +50,12 @@ clustering:
   # Maximum allowed displacement multiplier relative to snap_tolerance_m (float)
   # options: >1.0 (e.g., 1.0..10.0)
   # explanation: abort if cluster displacement exceeds this × snap_tolerance_m
-  max_displacement_multiplier: 1.5
+  max_displacement_multiplier: 3.0
 
   # Warning threshold for displacement (float)
   # options: >=1.0 (e.g., 1.05..2.0)
   # explanation: emit warnings if displacement > this × snap_tolerance_m
-  warning_displacement_multiplier: 1.2
+  warning_displacement_multiplier: 2.0
 
   # Max cluster size to warn about (integer)
   # options: 1..N

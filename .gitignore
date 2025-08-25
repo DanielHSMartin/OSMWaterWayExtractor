@@ -1,4 +1,3 @@
-*.pbf
 *.parquet
 *.csv.gz
 *.geojson
@@ -8,3 +7,6 @@
 intermediate/
 __pycache__/
 venv/
+brazil-latest.osm.pbf
+norte-latest.osm.pbf
+centro-oeste-latest.osm.pbf
