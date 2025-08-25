@@ -120,12 +120,12 @@ class Config:
     hash_encoding: str = "base62"
     
     # Output parameters
-    server_formats: List[str] = field(default_factory=lambda: ["parquet", "csv", "geojson"])
-    mobile_formats: List[str] = field(default_factory=lambda: ["csv"])
-    mobile_max_chunk_size_mb: int = 10
+    server_formats: List[str] = field(default_factory=lambda: ["parquet", "csv", "geojson", "jsongz"])
     compression: bool = True
     include_geodesic_distances: bool = True
-    enable_json_gz_format: bool = False
+    generate_mobile_csv: bool = False
+    generate_id_mapping: bool = False
+    generate_manifest: bool = False
     
     # QA parameters
     enable_comprehensive_metrics: bool = True
@@ -147,8 +147,6 @@ class Config:
             self.waterway_types = ["river", "canal"]
         if self.server_formats is None:
             self.server_formats = ["parquet", "csv", "geojson"]
-        if self.mobile_formats is None:
-            self.mobile_formats = ["csv"]
         if self.qa_thresholds is None:
             self.qa_thresholds = {
                 "max_unsnapped_near_miss_pct": 0.1,
@@ -200,11 +198,11 @@ class Config:
             output = data['output']
             config_dict.update({
                 'server_formats': output.get('server_formats', ['parquet', 'csv', 'geojson']),
-                'mobile_formats': output.get('mobile_formats', ['csv']),
-                'mobile_max_chunk_size_mb': output.get('mobile_max_chunk_size_mb', 10),
                 'compression': output.get('compression', True),
                 'include_geodesic_distances': output.get('include_geodesic_distances', True),
-                'enable_json_gz_format': output.get('enable_json_gz_format', False)
+                'generate_mobile_csv': output.get('generate_mobile_csv', False),
+                'generate_id_mapping': output.get('generate_id_mapping', False),
+                'generate_manifest': output.get('generate_manifest', False),
             })
         
         if 'qa' in data:
@@ -603,15 +601,24 @@ class WaterwayHandler(osmium.SimpleHandler):
         osmium.SimpleHandler.__init__(self)
         self.config = config
         self.waterways = []
-        # Use osmium's WKB factory to get geometries
+        self.waterway_type_counts = Counter()  # Track what waterway types we see
+        self.matching_waterways = 0  # Track how many match our filter
+        self.processed_waterways = 0  # Track how many we successfully process
+        # Use osmium's WKB factory to get geometries - need location handler for coordinates
         self.wkb_factory = osmium.geom.WKBFactory()
         
     def way(self, w):
         """Extract ways that match configured waterway types."""
         tags = {tag.k: tag.v for tag in w.tags}
         
+        # Track all waterway types found (for debugging)
+        if 'waterway' in tags:
+            self.waterway_type_counts[tags['waterway']] += 1
+        
         # Only process waterways that match configuration
         if tags.get('waterway') in self.config.waterway_types:
+            self.matching_waterways += 1
+            
             try:
                 # Get the geometry using osmium's WKB factory
                 wkb = self.wkb_factory.create_linestring(w)
@@ -629,10 +636,15 @@ class WaterwayHandler(osmium.SimpleHandler):
                             'coordinates': coords,
                             'tags': tags
                         })
+                        self.processed_waterways += 1
+                    else:
+                        logger.debug(f"Skipping way {w.id}: insufficient coordinates ({len(coords)})")
+                else:
+                    logger.debug(f"Skipping way {w.id}: no geometry created by WKB factory")
                         
             except Exception as e:
                 # Skip ways that can't be processed (e.g., incomplete geometry)
-                logger.debug(f"Skipping way {w.id}: {e}")
+                logger.debug(f"Error processing way {w.id}: {e}")
 
 
 
@@ -927,9 +939,22 @@ def extract_waterways(pbf_file: str, config: Config, cache_file: Optional[str] =
     logger.info(f"Extracting waterways from PBF: {pbf_file}")
     
     handler = WaterwayHandler(config)
-    handler.apply_file(pbf_file)
+    # Apply with locations to get node coordinates for ways
+    handler.apply_file(pbf_file, locations=True)
     
     logger.info(f"Extracted {len(handler.waterways)} waterways")
+    
+    # Log debugging info about processing
+    if handler.matching_waterways > 0:
+        logger.info(f"Found {handler.matching_waterways} waterways matching filter, successfully processed {handler.processed_waterways}")
+    
+    # Log what waterway types were found for debugging
+    if handler.waterway_type_counts:
+        logger.info("Waterway types found in file:")
+        for waterway_type, count in handler.waterway_type_counts.most_common():
+            logger.info(f"  {waterway_type}: {count}")
+    else:
+        logger.warning("No waterway tags found in the file at all")
     
     # Save to cache if requested
     if cache_file:
@@ -963,22 +988,24 @@ class OutputManager:
             file_sizes.update(self._save_geojson(edges, base_filename))
         
         # JSON GZ format if enabled (compatible with original format)
-        if self.config.enable_json_gz_format:
+        if "jsongz" in self.config.server_formats:
             file_sizes.update(self._save_json_gz_format(nodes, edges, base_filename))
         
-        # Mobile outputs with sequential IDs
-        mobile_nodes, mobile_edges = self._convert_to_mobile_format(nodes, edges, id_generator)
-        file_sizes.update(self._save_mobile_csv(mobile_nodes, mobile_edges, base_filename))
+        # Mobile outputs with sequential IDs (only if enabled)
+        if self.config.generate_mobile_csv:
+            mobile_nodes, mobile_edges = self._convert_to_mobile_format(nodes, edges, id_generator)
+            file_sizes.update(self._save_mobile_csv(mobile_nodes, mobile_edges, base_filename))
         
-        # Save QA metrics
+        # Save QA metrics (always generated as it's essential for validation)
         qa_file = f"{base_filename}.qa_summary.json"
         self._save_json(qa_metrics, qa_file)
         file_sizes[qa_file] = os.path.getsize(qa_file)
         
-        # Save ID mapping for reference
-        mapping_file = f"{base_filename}.id_mapping.json"
-        self._save_json(id_generator.mobile_id_mapping, mapping_file)
-        file_sizes[mapping_file] = os.path.getsize(mapping_file)
+        # Save ID mapping for reference (only if enabled)
+        if self.config.generate_id_mapping:
+            mapping_file = f"{base_filename}.id_mapping.json"
+            self._save_json(id_generator.mobile_id_mapping, mapping_file)
+            file_sizes[mapping_file] = os.path.getsize(mapping_file)
         
         return file_sizes
     
@@ -1320,8 +1347,6 @@ Attribution:
         if args.no_cache:
             config.enable_parameter_based_caching = False
             config.reuse_extraction = False
-        if args.enable_json_gz_format:
-            config.enable_json_gz_format = True
         
         logger.info(f"Configuration: snap_tolerance={config.snap_tolerance_m}m, "
                    f"min_length={config.min_fragment_length_m}m, "
@@ -1350,12 +1375,14 @@ Attribution:
         file_sizes = output_manager.save_outputs(nodes, edges, base_filename, 
                                                 graph_builder.qa_metrics, graph_builder.id_generator)
         
-        # Step 4: Generate manifest
-        manifest = ManifestGenerator.generate_manifest(args.input_file, config, 
-                                                      graph_builder.qa_metrics, file_sizes)
-        manifest_file = f"{base_filename}.manifest.json"
-        with open(manifest_file, 'w') as f:
-            json.dump(manifest, f, indent=2)
+        # Step 4: Generate manifest (only if enabled)
+        if config.generate_manifest:
+            manifest = ManifestGenerator.generate_manifest(args.input_file, config, 
+                                                          graph_builder.qa_metrics, file_sizes)
+            manifest_file = f"{base_filename}.manifest.json"
+            with open(manifest_file, 'w') as f:
+                json.dump(manifest, f, indent=2)
+            file_sizes[manifest_file] = os.path.getsize(manifest_file)
         
         # Print summary
         print("\n" + "="*60)
@@ -1372,9 +1399,6 @@ Attribution:
         print(f"  Coordinate precision: {config.coordinate_precision} decimal places")
         print(f"  Distance calculation: {config.distance_calculation_method}")
         
-        if config.enable_json_gz_format:
-            print(f"  JSON GZ format: Enabled (compatible with original format)")
-        
         print(f"\nQuality Metrics:")
         print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
         print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
@@ -1383,8 +1407,6 @@ Attribution:
         print(f"\nOutput files:")
         for filename, size in file_sizes.items():
             print(f"  {filename} ({size:,} bytes)")
-        
-        print(f"  {manifest_file} (manifest)")
         
         total_size = sum(file_sizes.values())
         print(f"  Total size: {total_size:,} bytes")
