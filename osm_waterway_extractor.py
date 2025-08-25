@@ -1354,6 +1354,17 @@ class ModernWaterwayGraphBuilder:
             if simplified_cache_file:
                 save_intermediate_cache(simplified_waterways, simplified_cache_file)
         
+        # Step 1.75: Detect line intersections and split waterways (new step per spec 3.5)
+        logger.info("Step 1.75: Detecting line intersections and splitting waterways...")
+        intersections_cache_file = get_intermediate_cache_filename(input_file, self.config, "intersections") if self.config.enable_parameter_based_caching else None
+        
+        if intersections_cache_file and os.path.exists(intersections_cache_file):
+            waterways_with_intersections = load_intermediate_cache(intersections_cache_file)
+        else:
+            waterways_with_intersections = self._detect_and_split_intersections(simplified_waterways)
+            if intersections_cache_file:
+                save_intermediate_cache(waterways_with_intersections, intersections_cache_file)
+        
         # Step 2: Extract all unique endpoints and junctions
         logger.info("Step 2: Extracting endpoints and identifying junctions...")
         endpoints_cache_file = get_intermediate_cache_filename(input_file, self.config, "endpoints") if self.config.enable_parameter_based_caching else None
@@ -1362,7 +1373,7 @@ class ModernWaterwayGraphBuilder:
             cached_data = load_intermediate_cache(endpoints_cache_file)
             endpoints, junctions = cached_data['endpoints'], cached_data['junctions']
         else:
-            endpoints, junctions = self._extract_endpoints_and_junctions(simplified_waterways)
+            endpoints, junctions = self._extract_endpoints_and_junctions(waterways_with_intersections)
             if endpoints_cache_file:
                 save_intermediate_cache({'endpoints': endpoints, 'junctions': junctions}, endpoints_cache_file)
         
@@ -1384,7 +1395,7 @@ class ModernWaterwayGraphBuilder:
         if edges_cache_file and os.path.exists(edges_cache_file):
             edges = load_intermediate_cache(edges_cache_file)
         else:
-            edges = self._create_edges(simplified_waterways, coord_mapping)
+            edges = self._create_edges(waterways_with_intersections, coord_mapping)
             if edges_cache_file:
                 save_intermediate_cache(edges, edges_cache_file)
         
@@ -1699,6 +1710,213 @@ class ModernWaterwayGraphBuilder:
                 simplified.append(waterway)
         
         return simplified
+    
+    def _detect_and_split_intersections(self, waterways: List[Dict]) -> List[Dict]:
+        """Detect line intersections and split waterways at intersection points (Specification 3.5)."""
+        if len(waterways) < 2:
+            logger.info("Less than 2 waterways, skipping intersection detection")
+            return waterways
+            
+        logger.info(f"Detecting intersections between {len(waterways)} waterways...")
+        
+        # Create spatial index for efficient intersection detection
+        try:
+            from rtree import index
+            spatial_index = index.Index()
+            
+            # Index all waterway line segments  
+            waterway_lines = {}
+            for i, waterway in enumerate(waterways):
+                coords = waterway['coordinates']
+                if len(coords) >= 2:
+                    line = LineString([(lon, lat) for lat, lon in coords])
+                    waterway_lines[i] = line
+                    # Add to spatial index using bounds
+                    spatial_index.insert(i, line.bounds)
+            
+            logger.info(f"Created spatial index with {len(waterway_lines)} waterway lines")
+            
+            # Find all intersection points
+            intersection_points = []
+            intersected_waterways = set()
+            
+            for i, line_i in waterway_lines.items():
+                # Query spatial index for potential intersections
+                potential_intersections = list(spatial_index.intersection(line_i.bounds))
+                
+                for j in potential_intersections:
+                    if j <= i:  # Avoid duplicate checks and self-intersection
+                        continue
+                        
+                    line_j = waterway_lines[j]
+                    
+                    try:
+                        # Check for actual geometric intersection
+                        intersection = line_i.intersection(line_j)
+                        
+                        if not intersection.is_empty:
+                            if intersection.geom_type == 'Point':
+                                # Single intersection point
+                                point = intersection
+                                lat, lon = point.y, point.x
+                                intersection_points.append((lat, lon))
+                                intersected_waterways.add(i)
+                                intersected_waterways.add(j)
+                                logger.debug(f"Found intersection between waterway {waterways[i]['id']} and {waterways[j]['id']} at ({lat:.6f}, {lon:.6f})")
+                                
+                            elif intersection.geom_type == 'MultiPoint':
+                                # Multiple intersection points
+                                for point in intersection.geoms:
+                                    lat, lon = point.y, point.x
+                                    intersection_points.append((lat, lon))
+                                    intersected_waterways.add(i)
+                                    intersected_waterways.add(j)
+                                    logger.debug(f"Found intersection between waterway {waterways[i]['id']} and {waterways[j]['id']} at ({lat:.6f}, {lon:.6f})")
+                                    
+                            # Note: LineString intersections (overlapping segments) are more complex and less common
+                            # For now, we focus on point intersections which solve the reported issue
+                                    
+                    except Exception as e:
+                        logger.debug(f"Error checking intersection between waterways {waterways[i]['id']} and {waterways[j]['id']}: {e}")
+                        continue
+                        
+            logger.info(f"Found {len(intersection_points)} intersection points affecting {len(intersected_waterways)} waterways")
+            
+            if not intersection_points:
+                logger.info("No intersections found, returning original waterways")
+                return waterways
+                
+            # Split waterways at intersection points
+            return self._split_waterways_at_intersections(waterways, intersection_points)
+            
+        except ImportError:
+            logger.warning("rtree not available, falling back to basic intersection detection")
+            return self._detect_intersections_basic(waterways)
+        except Exception as e:
+            logger.error(f"Error in intersection detection: {e}")
+            logger.warning("Falling back to original waterways without intersection detection")
+            return waterways
+    
+    def _detect_intersections_basic(self, waterways: List[Dict]) -> List[Dict]:
+        """Basic intersection detection without spatial indexing (fallback)."""
+        logger.info("Using basic O(n²) intersection detection...")
+        
+        intersection_points = []
+        
+        for i in range(len(waterways)):
+            for j in range(i + 1, len(waterways)):
+                try:
+                    coords_i = waterways[i]['coordinates']
+                    coords_j = waterways[j]['coordinates']
+                    
+                    if len(coords_i) < 2 or len(coords_j) < 2:
+                        continue
+                        
+                    line_i = LineString([(lon, lat) for lat, lon in coords_i])
+                    line_j = LineString([(lon, lat) for lat, lon in coords_j])
+                    
+                    intersection = line_i.intersection(line_j)
+                    
+                    if not intersection.is_empty and intersection.geom_type == 'Point':
+                        lat, lon = intersection.y, intersection.x
+                        intersection_points.append((lat, lon))
+                        logger.debug(f"Found intersection between waterway {waterways[i]['id']} and {waterways[j]['id']} at ({lat:.6f}, {lon:.6f})")
+                        
+                except Exception as e:
+                    logger.debug(f"Error checking intersection between waterways {waterways[i]['id']} and {waterways[j]['id']}: {e}")
+                    continue
+                    
+        logger.info(f"Found {len(intersection_points)} intersection points")
+        
+        if not intersection_points:
+            return waterways
+            
+        return self._split_waterways_at_intersections(waterways, intersection_points)
+    
+    def _split_waterways_at_intersections(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
+        """Split waterways by inserting intersection points into their coordinate sequences."""
+        if not intersection_points:
+            return waterways
+            
+        logger.info(f"Splitting waterways at {len(intersection_points)} intersection points...")
+        
+        modified_waterways = []
+        split_count = 0
+        
+        for waterway in waterways:
+            coords = waterway['coordinates']
+            if len(coords) < 2:
+                modified_waterways.append(waterway)
+                continue
+                
+            # Create LineString for this waterway
+            line = LineString([(lon, lat) for lat, lon in coords])
+            
+            # Find intersection points that lie on this line
+            points_on_line = []
+            for int_lat, int_lon in intersection_points:
+                int_point = Point(int_lon, int_lat)
+                
+                # Check if intersection point lies on this line (with small tolerance for floating point precision)
+                distance_to_line = line.distance(int_point)
+                tolerance_degrees = self.config.snap_tolerance_m * 0.00001  # rough conversion to degrees
+                
+                if distance_to_line < tolerance_degrees:
+                    # Find the position along the line where this intersection occurs
+                    position = line.project(int_point)
+                    points_on_line.append((position, int_lat, int_lon))
+                    
+            if not points_on_line:
+                # No intersections on this waterway
+                modified_waterways.append(waterway)
+                continue
+                
+            # Sort intersection points by their position along the line
+            points_on_line.sort(key=lambda x: x[0])
+            
+            # Insert intersection points into the coordinate sequence
+            new_coords = []
+            
+            for i, coord in enumerate(coords):
+                new_coords.append(coord)
+                
+                # If not the last coordinate, check for intersections in the next segment
+                if i < len(coords) - 1:
+                    next_coord = coords[i + 1]
+                    current_segment_start = line.project(Point(coord[1], coord[0]))
+                    current_segment_end = line.project(Point(next_coord[1], next_coord[0]))
+                    
+                    # Find intersection points that fall within this segment
+                    for position, int_lat, int_lon in points_on_line:
+                        point_distance = position
+                        
+                        # Check if intersection point is in this segment
+                        if current_segment_start < point_distance < current_segment_end:
+                            # Round to the configured precision
+                            rounded_lat = round(int_lat, self.config.coordinate_precision)
+                            rounded_lon = round(int_lon, self.config.coordinate_precision)
+                            
+                            # Only add if it's not already present (avoid duplicates)
+                            if (rounded_lat, rounded_lon) not in new_coords:
+                                new_coords.append((rounded_lat, rounded_lon))
+                                split_count += 1
+                                logger.debug(f"Inserted intersection point ({rounded_lat:.6f}, {rounded_lon:.6f}) into waterway {waterway['id']}")
+            
+            # Remove consecutive duplicate coordinates
+            deduplicated_coords = [new_coords[0]] if new_coords else []
+            for coord in new_coords[1:]:
+                if coord != deduplicated_coords[-1]:
+                    deduplicated_coords.append(coord)
+            
+            # Create updated waterway with intersection points inserted
+            modified_waterways.append({
+                'id': waterway['id'],
+                'coordinates': deduplicated_coords,
+                'tags': waterway['tags']
+            })
+            
+        logger.info(f"Inserted {split_count} intersection points into waterway coordinate sequences")
+        return modified_waterways
     
     def _extract_endpoints_and_junctions(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract unique endpoints and identify junction points."""
@@ -2575,7 +2793,7 @@ def get_output_base_filename(input_file: str) -> str:
 
 def create_test_waterways() -> List[Dict]:
     """Create synthetic test waterways for validation."""
-    # Create a simple test network: main river with a tributary
+    # Create a test network: main river with a tributary and crossing waterways (to test intersection detection)
     return [
         {
             'id': 1,
@@ -2591,6 +2809,11 @@ def create_test_waterways() -> List[Dict]:
             'id': 3,
             'coordinates': [(52.52, 13.42), (52.53, 13.43), (52.54, 13.44)],  # Continuation
             'tags': {'waterway': 'river', 'name': 'Test River'}
+        },
+        {
+            'id': 4,
+            'coordinates': [(52.505, 13.405), (52.515, 13.415), (52.525, 13.425)],  # Crossing waterway (should intersect main river)
+            'tags': {'waterway': 'stream', 'name': 'Test Crossing Stream', 'width': '2 m'}
         }
     ]
 
