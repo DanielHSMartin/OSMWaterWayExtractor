@@ -9,4 +9,4 @@ __pycache__/
 venv/
 brazil-latest.osm.pbf
 norte-latest.osm.pbf
-*.pbf
+centro-oeste-latest.osm.pbf
