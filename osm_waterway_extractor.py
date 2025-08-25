@@ -32,6 +32,8 @@ from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Tuple, Optional, Any, Set
 import logging
 import concurrent.futures
+import multiprocessing
+import functools
 import numpy as np
 import yaml
 
@@ -383,6 +385,530 @@ class UnionFind:
                 clusters[root] = []
             clusters[root].append(item)
         return clusters
+
+
+# Global geod calculator for multiprocessing (initialized in worker processes)
+_GLOBAL_GEOD = None
+
+def _init_worker_geod(method="geodesic"):
+    """Initialize geodesic calculator in worker process"""
+    global _GLOBAL_GEOD
+    _GLOBAL_GEOD = Geod(ellps='WGS84')
+
+def _calculate_geodesic_distance(coord1, coord2):
+    """Calculate geodesic distance between two coordinates (worker function)"""
+    global _GLOBAL_GEOD
+    if _GLOBAL_GEOD is None:
+        _GLOBAL_GEOD = Geod(ellps='WGS84')
+    
+    # coord format is (lat, lon), but geod expects (lon, lat, lon, lat)
+    _, _, distance = _GLOBAL_GEOD.inv(coord1[1], coord1[0], coord2[1], coord2[0])
+    return distance
+
+def _calculate_segment_length_worker(coords):
+    """Calculate segment length in worker process"""
+    if len(coords) < 2:
+        return 0.0
+    
+    total_length = 0.0
+    for i in range(1, len(coords)):
+        total_length += _calculate_geodesic_distance(coords[i-1], coords[i])
+    
+    return total_length
+
+def _calculate_segment_length_vectorized(coords_list):
+    """Calculate segment lengths for multiple coordinate lists using vectorized operations"""
+    try:
+        from pyproj import Geod
+        import numpy as np
+        
+        geod = Geod(ellps='WGS84')
+        results = []
+        
+        for coords in coords_list:
+            if len(coords) < 2:
+                results.append(0.0)
+                continue
+                
+            # Convert to numpy arrays for vectorized operations
+            coords_array = np.array(coords)
+            lats = coords_array[:, 0]
+            lons = coords_array[:, 1]
+            
+            if len(coords) >= 2:
+                # Get consecutive pairs
+                lat1 = lats[:-1]
+                lon1 = lons[:-1]
+                lat2 = lats[1:]
+                lon2 = lons[1:]
+                
+                # Vectorized geodesic calculation
+                try:
+                    distances = geod.inv(lon1, lat1, lon2, lat2)[2]
+                    total_length = np.sum(distances)
+                    results.append(float(total_length))
+                except:
+                    # Fall back to single calculations
+                    total_length = 0.0
+                    for i in range(1, len(coords)):
+                        total_length += geod.inv(coords[i-1][1], coords[i-1][0], 
+                                              coords[i][1], coords[i][0])[2]
+                    results.append(total_length)
+            else:
+                results.append(0.0)
+                
+        return results
+        
+    except ImportError:
+        # Fall back to single calculations if numpy not available
+        from pyproj import Geod
+        geod = Geod(ellps='WGS84')
+        results = []
+        
+        for coords in coords_list:
+            if len(coords) < 2:
+                results.append(0.0)
+                continue
+                
+            total_length = 0.0
+            for i in range(1, len(coords)):
+                total_length += geod.inv(coords[i-1][1], coords[i-1][0], 
+                                      coords[i][1], coords[i][0])[2]
+            results.append(total_length)
+            
+        return results
+
+def _process_waterway_batch_for_edges(args):
+    """Process a batch of waterways to create edges with vectorized distance calculations"""
+    waterway_batch, coord_mapping, config_dict = args
+    
+    # Recreate necessary objects in worker process
+    from pyproj import Geod
+    import xxhash
+    
+    geod = Geod(ellps='WGS84')
+    
+    all_edges = []
+    
+    # Batch process segments for distance calculation
+    segment_coords_list = []
+    segment_metadata = []
+    
+    for waterway in waterway_batch:
+        coords = waterway['coordinates']
+        way_id = waterway['id']
+        tags = waterway['tags']
+        
+        # Apply coordinate mapping from clustering
+        mapped_coords = [coord_mapping.get(coord, coord) for coord in coords]
+        
+        # Split waterway at junction points and collect segments
+        waterway_edges = _split_waterway_collect_segments(
+            mapped_coords, way_id, tags, coord_mapping, config_dict
+        )
+        
+        for edge_data in waterway_edges:
+            segment_coords_list.append(edge_data['coordinates'])
+            segment_metadata.append(edge_data)
+    
+    # Calculate all segment lengths in batch using vectorized operations
+    if segment_coords_list:
+        segment_lengths = _calculate_segment_length_vectorized(segment_coords_list)
+        
+        # Assign lengths back to edges
+        for i, edge_data in enumerate(segment_metadata):
+            edge_data['length_m'] = segment_lengths[i]
+            all_edges.append(edge_data)
+    
+    return all_edges
+
+def _optimize_coord_mapping_for_multiprocessing(coord_mapping):
+    """Convert coordinate mapping to a more efficient format for multiprocessing"""
+    # Convert to a format that serializes more efficiently
+    optimized_mapping = {}
+    
+    for coord, mapped_coord in coord_mapping.items():
+        # Only include mappings that actually change coordinates
+        if coord != mapped_coord:
+            key = f"{coord[0]:.6f},{coord[1]:.6f}"
+            value = f"{mapped_coord[0]:.6f},{mapped_coord[1]:.6f}"
+            optimized_mapping[key] = value
+    
+    return optimized_mapping
+
+def _restore_coord_mapping(optimized_mapping):
+    """Restore coordinate mapping from optimized format"""
+    coord_mapping = {}
+    
+    for key, value in optimized_mapping.items():
+        lat1, lon1 = map(float, key.split(','))
+        lat2, lon2 = map(float, value.split(','))
+        coord_mapping[(lat1, lon1)] = (lat2, lon2)
+    
+    return coord_mapping
+
+def _process_waterway_batch_optimized(args):
+    """Process a batch of waterways with optimized coordinate mapping"""
+    waterway_batch, optimized_coord_mapping, config_dict = args
+    
+    # Restore coordinate mapping
+    coord_mapping = _restore_coord_mapping(optimized_coord_mapping)
+    
+    # Add identity mappings for coordinates not in the optimized mapping
+    all_coords = set()
+    for waterway in waterway_batch:
+        all_coords.update(waterway['coordinates'])
+    
+    for coord in all_coords:
+        if coord not in coord_mapping:
+            coord_mapping[coord] = coord
+    
+    # Process using the batch function
+    batch_args = (waterway_batch, coord_mapping, config_dict)
+    return _process_waterway_batch_for_edges(batch_args)
+
+def _split_waterway_collect_segments(coords, way_id, tags, coord_mapping, config_dict):
+    """Process a batch of waterways with optimized coordinate mapping"""
+    waterway_batch, optimized_coord_mapping, config_dict = args
+    
+    # Restore coordinate mapping
+    coord_mapping = _restore_coord_mapping(optimized_coord_mapping)
+    
+    # Add identity mappings for coordinates not in the optimized mapping
+    all_coords = set()
+    for waterway in waterway_batch:
+        all_coords.update(waterway['coordinates'])
+    
+    for coord in all_coords:
+        if coord not in coord_mapping:
+            coord_mapping[coord] = coord
+    
+    # Process as before
+    return _process_waterway_batch_for_edges((waterway_batch, coord_mapping, config_dict))
+    """Split a waterway into segments and collect metadata (without calculating lengths)"""
+    if len(coords) < 2:
+        return []
+    
+    # Find all junction points in this waterway
+    junction_indices = []
+    junction_coords = set(coord for coord, mapped in coord_mapping.items() 
+                        if coord != mapped or _is_junction_coord_worker(coord, coord_mapping))
+    
+    for i, coord in enumerate(coords):
+        if coord in junction_coords or i == 0 or i == len(coords) - 1:
+            junction_indices.append(i)
+    
+    # Create edge metadata between junction points
+    edges = []
+    for i in range(len(junction_indices) - 1):
+        start_idx = junction_indices[i]
+        end_idx = junction_indices[i + 1]
+        
+        if end_idx > start_idx:
+            segment_coords = coords[start_idx:end_idx + 1]
+            
+            if len(segment_coords) >= 2:
+                # Generate deterministic IDs
+                start_coord = segment_coords[0]
+                end_coord = segment_coords[-1]
+                
+                start_node_id = _generate_node_id_worker(start_coord[0], start_coord[1], config_dict)
+                end_node_id = _generate_node_id_worker(end_coord[0], end_coord[1], config_dict)
+                edge_id = _generate_edge_id_worker(start_node_id, end_node_id, way_id, i, config_dict)
+                
+                # Extract and normalize width information
+                width_info = _parse_width_tags_worker(tags)
+                
+                edges.append({
+                    'id': edge_id,
+                    'from_node_id': start_node_id,
+                    'to_node_id': end_node_id,
+                    'length_m': 0.0,  # Will be calculated in batch
+                    'coordinates': segment_coords,
+                    'name': tags.get('name', ''),
+                    'type': tags.get('waterway', ''),
+                    'width_raw': width_info['raw'],
+                    'width_m': width_info['meters'],
+                    'width_source': width_info['source'],
+                    'original_way_id': way_id
+                })
+    
+    return edges
+
+
+def _process_waterway_for_edges(args):
+    """Process a single waterway to create edges (multiprocessing worker function)"""
+    waterway, coord_mapping, config_dict = args
+    
+    # Recreate necessary objects in worker process
+    from pyproj import Geod
+    geod = Geod(ellps='WGS84')
+    
+    coords = waterway['coordinates']
+    way_id = waterway['id']
+    tags = waterway['tags']
+    
+    # Apply coordinate mapping from clustering
+    mapped_coords = [coord_mapping.get(coord, coord) for coord in coords]
+    
+    # Split waterway at junction points
+    edges = _split_waterway_at_junctions_worker(
+        mapped_coords, way_id, tags, coord_mapping, config_dict, geod
+    )
+    
+    return edges
+
+def _split_waterway_at_junctions_worker(coords, way_id, tags, coord_mapping, config_dict, geod):
+    """Split a waterway into edges at junction points (worker function)"""
+    if len(coords) < 2:
+        return []
+    
+    # Find all junction points in this waterway
+    junction_indices = []
+    junction_coords = set(coord for coord, mapped in coord_mapping.items() 
+                        if coord != mapped or _is_junction_coord_worker(coord, coord_mapping))
+    
+    for i, coord in enumerate(coords):
+        if coord in junction_coords or i == 0 or i == len(coords) - 1:
+            junction_indices.append(i)
+    
+    # Create edges between junction points
+    edges = []
+    for i in range(len(junction_indices) - 1):
+        start_idx = junction_indices[i]
+        end_idx = junction_indices[i + 1]
+        
+        if end_idx > start_idx:
+            segment_coords = coords[start_idx:end_idx + 1]
+            
+            if len(segment_coords) >= 2:
+                # Calculate accurate geodesic length
+                length_m = _calculate_segment_length_geodesic_worker(segment_coords, geod)
+                
+                # Generate deterministic IDs
+                start_coord = segment_coords[0]
+                end_coord = segment_coords[-1]
+                
+                start_node_id = _generate_node_id_worker(start_coord[0], start_coord[1], config_dict)
+                end_node_id = _generate_node_id_worker(end_coord[0], end_coord[1], config_dict)
+                edge_id = _generate_edge_id_worker(start_node_id, end_node_id, way_id, i, config_dict)
+                
+                # Extract and normalize width information
+                width_info = _parse_width_tags_worker(tags)
+                
+                edges.append({
+                    'id': edge_id,
+                    'from_node_id': start_node_id,
+                    'to_node_id': end_node_id,
+                    'length_m': length_m,
+                    'coordinates': segment_coords,
+                    'name': tags.get('name', ''),
+                    'type': tags.get('waterway', ''),
+                    'width_raw': width_info['raw'],
+                    'width_m': width_info['meters'],
+                    'width_source': width_info['source'],
+                    'original_way_id': way_id
+                })
+    
+    return edges
+
+def _calculate_segment_length_geodesic_worker(coords, geod):
+    """Calculate segment length using geodesic calculations in worker"""
+    if len(coords) < 2:
+        return 0.0
+    
+    total_length = 0.0
+    for i in range(1, len(coords)):
+        lat1, lon1 = coords[i-1]
+        lat2, lon2 = coords[i]
+        # Geod.inv expects (lon1, lat1, lon2, lat2) and returns (az12, az21, dist)
+        total_length += geod.inv(lon1, lat1, lon2, lat2)[2]
+    
+    return total_length
+
+def _is_junction_coord_worker(coord, coord_mapping):
+    """Check if a coordinate is a junction point (worker function)"""
+    return coord in coord_mapping
+
+def _generate_node_id_worker(lat, lon, config_dict):
+    """Generate deterministic node ID for a coordinate (worker function)"""
+    import xxhash
+    
+    # Round to specified precision for consistent hashing
+    coordinate_precision = config_dict.get('coordinate_precision', 6)
+    hash_length = config_dict.get('hash_length', 8)
+    
+    rounded_lat = round(lat, coordinate_precision)
+    rounded_lon = round(lon, coordinate_precision)
+    
+    hasher = xxhash.xxh64()
+    hasher.update(f"{rounded_lat},{rounded_lon}".encode())
+    hash_int = hasher.intdigest()
+    
+    # Convert to base62 for compact representation
+    result = _int_to_base62_worker(hash_int)[:hash_length]
+    return f"n{result}"
+
+def _generate_edge_id_worker(from_node_id, to_node_id, original_way_id, segment_index, config_dict):
+    """Generate deterministic edge ID (worker function)"""
+    import xxhash
+    
+    hash_length = config_dict.get('hash_length', 8)
+    
+    hasher = xxhash.xxh64()
+    hasher.update(f"{from_node_id}-{to_node_id}-{original_way_id}-{segment_index}".encode())
+    hash_int = hasher.intdigest()
+    
+    result = _int_to_base62_worker(hash_int)[:hash_length]
+    return f"e{result}"
+
+def _int_to_base62_worker(num):
+    """Convert integer to base62 string (worker function)"""
+    if num == 0:
+        return '0'
+    
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    result = ""
+    num = abs(num)  # Ensure positive
+    
+    while num > 0:
+        result = chars[num % 62] + result
+        num //= 62
+    
+    return result
+
+def _parse_width_tags_worker(tags):
+    """Parse width information from OSM tags (worker function)"""
+    width_raw = tags.get('width', '')
+    width_m = None
+    width_source = 'none'
+    
+    if width_raw:
+        width_source = 'tag'
+        try:
+            # Handle common width formats
+            width_str = width_raw.lower().strip()
+            
+            if 'm' in width_str:
+                # "5 m", "5m", "5.5 m"
+                width_m = float(width_str.replace('m', '').strip())
+            elif 'ft' in width_str or 'feet' in width_str:
+                # "15 ft", "15 feet"
+                feet = float(width_str.replace('ft', '').replace('feet', '').strip())
+                width_m = feet * 0.3048  # Convert feet to meters
+            elif width_str.replace('.', '').isdigit():
+                # Assume meters if just a number
+                width_m = float(width_str)
+            
+            # Validate reasonable width values
+            if width_m is not None and (width_m <= 0 or width_m > 1000):
+                width_m = None  # Invalid width
+                
+        except (ValueError, AttributeError):
+            pass  # Keep width_m as None for unparseable values
+    
+    return {
+        'raw': width_raw,
+        'meters': width_m,
+        'source': width_source
+    }
+
+
+def _process_waterway_coordinates_chunk(args):
+    """Process waterway coordinates chunk for multiprocessing"""
+    waterway_chunk, coordinate_precision = args
+    
+    processed = []
+    
+    for waterway in waterway_chunk:
+        coords = waterway['coordinates']
+        if len(coords) < 2:
+            continue
+            
+        # Round coordinates to specified precision
+        rounded_coords = [
+            (round(lat, coordinate_precision), 
+             round(lon, coordinate_precision))
+            for lat, lon in coords
+        ]
+        
+        # Remove consecutive duplicate coordinates
+        deduplicated_coords = [rounded_coords[0]]
+        for coord in rounded_coords[1:]:
+            if coord != deduplicated_coords[-1]:
+                deduplicated_coords.append(coord)
+        
+        if len(deduplicated_coords) >= 2:
+            processed.append({
+                'id': waterway['id'],
+                'coordinates': deduplicated_coords,
+                'tags': waterway['tags']
+            })
+    
+    return processed
+
+def _simplify_geometry_chunk(args):
+    """Simplify geometry chunk for multiprocessing"""
+    waterway_chunk, simplification_tolerance_m = args
+    
+    simplified = []
+    tolerance_degrees = simplification_tolerance_m * 0.00001
+    
+    # Import shapely in worker process
+    try:
+        from shapely.geometry import LineString
+    except ImportError:
+        # Fall back to returning original if shapely not available
+        return waterway_chunk
+    
+    for waterway in waterway_chunk:
+        coords = waterway['coordinates']
+        if len(coords) < 2:
+            continue
+            
+        try:
+            # Convert to LineString
+            line = LineString([(lon, lat) for lat, lon in coords])
+            
+            # Simplify the geometry
+            simplified_line = line.simplify(tolerance_degrees, preserve_topology=True)
+            
+            # Convert back to coordinates
+            if simplified_line.geom_type == 'LineString':
+                simplified_coords = [(lat, lon) for lon, lat in simplified_line.coords]
+                
+                # Ensure we still have at least 2 points
+                if len(simplified_coords) >= 2:
+                    simplified.append({
+                        'id': waterway['id'],
+                        'coordinates': simplified_coords,
+                        'tags': waterway['tags']
+                    })
+                    
+        except Exception as e:
+            # Fall back to original if simplification fails
+            simplified.append(waterway)
+    
+    return simplified
+
+def _extract_endpoints_chunk(args):
+    """Extract endpoints from waterway chunk for multiprocessing"""
+    waterway_chunk, = args
+    
+    endpoint_count = Counter()
+    all_endpoints = []
+    
+    # Count how many times each coordinate appears as an endpoint
+    for waterway in waterway_chunk:
+        coords = waterway['coordinates']
+        start_coord = coords[0]
+        end_coord = coords[-1]
+        
+        endpoint_count[start_coord] += 1
+        endpoint_count[end_coord] += 1
+        all_endpoints.extend([start_coord, end_coord])
+    
+    return endpoint_count, all_endpoints
 
 
 class GeodCalculator:
@@ -907,10 +1433,43 @@ class ModernWaterwayGraphBuilder:
         # Use parallel processing for better performance with large datasets
         if self.config.parallel_workers > 1 and len(waterways) > 1000:
             logger.info(f"Processing {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
-            return self._process_waterways_parallel(waterways)
+            # Try multiprocessing first for better CPU utilization
+            try:
+                return self._process_waterways_multiprocessing(waterways)
+            except Exception as e:
+                logger.warning(f"Multiprocessing failed ({e}), falling back to threading")
+                return self._process_waterways_parallel(waterways)
         else:
             logger.info(f"Processing {len(waterways)} waterways sequentially")
             return self._process_waterways_sequential(waterways)
+    
+    def _process_waterways_multiprocessing(self, waterways: List[Dict]) -> List[Dict]:
+        """Process waterways using multiprocessing for improved performance."""
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        # Prepare work items for multiprocessing
+        work_items = [(chunk, self.config.coordinate_precision) for chunk in waterway_chunks]
+        
+        all_processed = []
+        
+        with multiprocessing.Pool(processes=self.config.parallel_workers) as pool:
+            try:
+                chunk_results = pool.map(_process_waterway_coordinates_chunk, work_items)
+                
+                # Flatten results
+                for chunk_processed in chunk_results:
+                    all_processed.extend(chunk_processed)
+                    
+            except Exception as e:
+                logger.error(f"Error in multiprocessing coordinate processing: {e}")
+                pool.terminate()
+                pool.join()
+                raise
+        
+        logger.info(f"Processed {len(all_processed)}/{len(waterways)} waterways after coordinate cleaning")
+        return all_processed
     
     def _process_waterways_sequential(self, waterways: List[Dict]) -> List[Dict]:
         """Process waterways sequentially (original implementation)."""
@@ -1013,10 +1572,45 @@ class ModernWaterwayGraphBuilder:
         # Use parallel processing for better performance with large datasets
         if self.config.parallel_workers > 1 and len(waterways) > 500:
             logger.info(f"Simplifying {len(waterways)} geometries using {self.config.parallel_workers} parallel workers")
-            return self._simplify_geometries_parallel(waterways)
+            # Try multiprocessing first for better CPU utilization
+            try:
+                return self._simplify_geometries_multiprocessing(waterways)
+            except Exception as e:
+                logger.warning(f"Multiprocessing failed ({e}), falling back to threading")
+                return self._simplify_geometries_parallel(waterways)
         else:
             logger.info(f"Simplifying {len(waterways)} geometries sequentially")
             return self._simplify_geometries_sequential(waterways)
+    
+    def _simplify_geometries_multiprocessing(self, waterways: List[Dict]) -> List[Dict]:
+        """Simplify geometries using multiprocessing for improved performance."""
+        logger.info(f"Simplifying geometries with tolerance {self.config.simplification_tolerance_m}m")
+        
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        # Prepare work items for multiprocessing
+        work_items = [(chunk, self.config.simplification_tolerance_m) for chunk in waterway_chunks]
+        
+        all_simplified = []
+        
+        with multiprocessing.Pool(processes=self.config.parallel_workers) as pool:
+            try:
+                chunk_results = pool.map(_simplify_geometry_chunk, work_items)
+                
+                # Flatten results
+                for chunk_simplified in chunk_results:
+                    all_simplified.extend(chunk_simplified)
+                    
+            except Exception as e:
+                logger.error(f"Error in multiprocessing geometry simplification: {e}")
+                pool.terminate()
+                pool.join()
+                raise
+        
+        logger.info(f"Simplified {len(all_simplified)}/{len(waterways)} waterways")
+        return all_simplified
     
     def _simplify_geometries_sequential(self, waterways: List[Dict]) -> List[Dict]:
         """Simplify geometries sequentially (original implementation)."""
@@ -1131,10 +1725,54 @@ class ModernWaterwayGraphBuilder:
         # Use parallel processing for better performance with large datasets
         if self.config.parallel_workers > 1 and len(waterways) > 1000:
             logger.info(f"Extracting endpoints from {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
-            return self._extract_endpoints_parallel(waterways)
+            # Try multiprocessing first for better CPU utilization
+            try:
+                return self._extract_endpoints_multiprocessing(waterways)
+            except Exception as e:
+                logger.warning(f"Multiprocessing failed ({e}), falling back to threading")
+                return self._extract_endpoints_parallel(waterways)
         else:
             logger.info(f"Extracting endpoints from {len(waterways)} waterways sequentially")
             return self._extract_endpoints_sequential(waterways)
+    
+    def _extract_endpoints_multiprocessing(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """Extract endpoints using multiprocessing for improved performance."""
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        # Prepare work items for multiprocessing
+        work_items = [(chunk,) for chunk in waterway_chunks]
+        
+        all_endpoint_counts = []
+        all_endpoints = []
+        
+        with multiprocessing.Pool(processes=self.config.parallel_workers) as pool:
+            try:
+                chunk_results = pool.map(_extract_endpoints_chunk, work_items)
+                
+                # Collect results
+                for chunk_endpoint_count, chunk_endpoints in chunk_results:
+                    all_endpoint_counts.append(chunk_endpoint_count)
+                    all_endpoints.extend(chunk_endpoints)
+                    
+            except Exception as e:
+                logger.error(f"Error in multiprocessing endpoint extraction: {e}")
+                pool.terminate()
+                pool.join()
+                raise
+        
+        # Merge all endpoint counts
+        endpoint_count = Counter()
+        for count_dict in all_endpoint_counts:
+            endpoint_count.update(count_dict)
+        
+        # Coordinates that appear more than once are junctions
+        junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        endpoints = list(set(all_endpoints))
+        
+        logger.info(f"Found {len(endpoints)} unique endpoints, {len(junctions)} junctions")
+        return endpoints, junctions
     
     def _extract_endpoints_sequential(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract endpoints sequentially (original implementation)."""
@@ -1222,10 +1860,68 @@ class ModernWaterwayGraphBuilder:
         # Use parallel processing for better performance
         if self.config.parallel_workers > 1 and len(waterways) > 100:
             logger.info(f"Processing {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
-            return self._create_edges_parallel(waterways, coord_mapping)
+            # Try ProcessPoolExecutor for CPU-intensive tasks, fall back to ThreadPoolExecutor
+            try:
+                return self._create_edges_multiprocessing(waterways, coord_mapping)
+            except Exception as e:
+                logger.warning(f"Multiprocessing failed ({e}), falling back to threading")
+                return self._create_edges_parallel(waterways, coord_mapping)
         else:
             logger.info(f"Processing {len(waterways)} waterways sequentially")
             return self._create_edges_sequential(waterways, coord_mapping)
+    
+    def _create_edges_multiprocessing(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
+        """Create edges using multiprocessing with vectorized distance calculations."""
+        # Prepare configuration for worker processes
+        config_dict = {
+            'coordinate_precision': self.config.coordinate_precision,
+            'hash_length': self.config.hash_length,
+            'min_fragment_length_m': self.config.min_fragment_length_m
+        }
+        
+        # Optimize coordinate mapping for more efficient serialization
+        optimized_coord_mapping = _optimize_coord_mapping_for_multiprocessing(coord_mapping)
+        
+        # Use smaller batches for better parallelization and less memory usage per process
+        batch_size = max(1, len(waterways) // (self.config.parallel_workers * 2))
+        waterway_batches = [
+            waterways[i:i + batch_size] 
+            for i in range(0, len(waterways), batch_size)
+        ]
+        
+        # Prepare work items for multiprocessing
+        work_items = [(batch, optimized_coord_mapping, config_dict) for batch in waterway_batches]
+        
+        all_edges = []
+        
+        # Use spawn method for better isolation (important for complex objects)
+        with multiprocessing.Pool(
+            processes=self.config.parallel_workers,
+            initializer=_init_worker_geod,
+            initargs=("geodesic",)
+        ) as pool:
+            try:
+                # Process waterway batches in parallel
+                batch_results = pool.map(_process_waterway_batch_optimized, work_items)
+                
+                # Flatten results
+                for batch_edges in batch_results:
+                    all_edges.extend(batch_edges)
+                    
+            except Exception as e:
+                logger.error(f"Error in multiprocessing: {e}")
+                pool.terminate()
+                pool.join()
+                raise
+        
+        # Filter by minimum length
+        filtered_edges = []
+        for edge in all_edges:
+            if edge['length_m'] >= self.config.min_fragment_length_m:
+                filtered_edges.append(edge)
+        
+        logger.info(f"Created {len(filtered_edges)}/{len(all_edges)} edges after length filtering")
+        return filtered_edges
     
     def _create_edges_sequential(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
         """Create edges sequentially (original implementation)."""
@@ -2047,4 +2743,11 @@ Attribution:
 
 
 if __name__ == "__main__":
+    # Set multiprocessing start method for better compatibility
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        # Start method already set
+        pass
+    
     main()
