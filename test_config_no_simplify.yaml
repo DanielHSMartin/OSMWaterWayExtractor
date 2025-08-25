@@ -1,0 +1,200 @@
+# Waterway Extraction Configuration v2.1 (annotated: shows possible options and short explanations)
+
+processing:
+  # Snap tolerance in meters (float)
+  # options: any positive float (typical: 0.5, 1.0, 2.0, 5.0)
+  # explanation: maximum distance to move vertices to snap to nearby nodes/edges
+  snap_tolerance_m: 5.0
+
+  # Minimum fragment/edge length in meters (float)
+  # options: any non-negative float (typical: 10.0, 50.0, 100.0)
+  # explanation: fragments shorter than this are filtered out or merged
+  min_fragment_length_m: 50.0
+
+  # Coordinate precision (integer)
+  # options: 0..12 (higher -> more decimal places; ~6 gives ~0.1m at equator)
+  # explanation: controls rounding/serialization precision of coordinates
+  coordinate_precision: 5
+
+  # Parallel workers (integer)
+  # options: 1..N (N = CPU cores). use 1 for single-threaded, >1 for parallel
+  # explanation: number of worker processes/threads for parallel stages
+  parallel_workers: 8
+
+  # Distance calculation method (string)
+  # options:
+  #   - "geodesic" : accurate on spheroid, slower (recommended)
+  #   - "projected": fast using a projected CRS, best for small areas
+  #   - "hybrid"   : geodesic for long distances, projected for local ops
+  # explanation: choose algorithm used to compute distances/lengths
+  distance_calculation_method: "geodesic"
+
+  # OSM waterway types to extract (list of strings)
+  # common options: "river", "stream", "canal", "drain", "ditch", "water", "reservoir", "weir"
+  # explanation: filters OSM features by their waterway tag
+  waterway_types:
+    - "river"
+    - "canal"
+
+  # Enable geometry simplification (boolean)
+  # options: true|false
+  # explanation: whether to simplify waterway geometries to reduce size
+  enable_geometry_simplification: false
+
+  # Geometry simplification tolerance in meters (float)
+  # options: any positive float (typical: 0.5, 1.0, 2.0, 5.0)
+  # explanation: maximum distance to move vertices during simplification
+  simplification_tolerance_m: 5.0
+
+clustering:
+  # Maximum allowed displacement multiplier relative to snap_tolerance_m (float)
+  # options: >1.0 (e.g., 1.0..10.0)
+  # explanation: abort if cluster displacement exceeds this × snap_tolerance_m
+  max_displacement_multiplier: 1.5
+
+  # Warning threshold for displacement (float)
+  # options: >=1.0 (e.g., 1.05..2.0)
+  # explanation: emit warnings if displacement > this × snap_tolerance_m
+  warning_displacement_multiplier: 1.2
+
+  # Max cluster size to warn about (integer)
+  # options: 1..N
+  # explanation: emit warning when clusters have more members than this
+  max_cluster_size_warning: 10
+
+  # Enable union-find (boolean)
+  # options: true|false
+  # explanation: use transitive union-find to merge clusters efficiently
+  enable_union_find: true
+
+ids:
+  # Server ID assignment strategy (string)
+  # options:
+  #   - "deterministic": same inputs -> same IDs (recommended for reproducibility)
+  #   - "sequential"   : assign incremental IDs (simpler, not stable across runs)
+  server_strategy: "deterministic"
+
+  # Mobile ID assignment strategy (string)
+  # options:
+  #   - "sequential": compact, incremental mobile IDs
+  #   - "deterministic": stable mapping (less compact)
+  mobile_strategy: "sequential"
+
+  # Hash function for deterministic IDs (string)
+  # options: "xxhash" (fast), "blake2" (secure+fast), "sha256" (secure, slower)
+  # explanation: selects hash algorithm when using deterministic ID generation
+  hash_function: "xxhash"
+
+  # Hash output length in characters (integer)
+  # options: 4..64 (shorter -> collisions more likely)
+  # explanation: number of characters used from the encoded hash
+  hash_length: 8
+
+  # Hash encoding (string)
+  # options: "base62" (compact alphanumeric), "hex" (hexadecimal)
+  # explanation: encoding used to render hash bytes as strings
+  hash_encoding: "base62"
+
+output:
+  # Server-side output formats (list)
+  # options: "parquet", "csv", "geojson", "shapefile", "gpkg", "feather", "jsongz"
+  # explanation: formats to emit for server/analysis consumers
+  server_formats:
+    - "geojson"
+    - "jsongz"
+
+  # Compression enabled (boolean) or use compression_method below if true
+  # options: true|false
+  # explanation: whether to compress output files
+  compression: true
+
+  # Compression method (commented options)
+  # options: "gzip" (widely compatible), "zstd" (fast+compact), "brotli" (good compression)
+  # (If compression: true and no method specified, "gzip" is used by default)
+  compression_method: "gzip"
+
+  # Include geodesic distances (boolean)
+  # options: true|false
+  # explanation: include geodesic (accurate spheroid) distance fields in outputs
+  include_geodesic_distances: true
+
+  # Generate mobile CSV files (boolean)
+  # options: true|false
+  # explanation: generate mobile-optimized CSV files with sequential IDs
+  generate_mobile_csv: false
+
+  # Generate ID mapping file (boolean)
+  # options: true|false
+  # explanation: generate mapping between deterministic and mobile IDs
+  generate_id_mapping: false
+
+  # Generate manifest file (boolean)
+  # options: true|false
+  # explanation: generate processing manifest for reproducibility
+  generate_manifest: true
+
+qa:
+  # Enable comprehensive QA metrics (boolean)
+  # options: true|false
+  # explanation: produce extended QA reports and metrics
+  enable_comprehensive_metrics: true
+
+  # Number of distance validation samples (integer)
+  # options: 0..N (0 disables sampling)
+  # explanation: how many random distance pairs to validate for accuracy
+  distance_validation_samples: 1000
+
+  # Generate debug outputs (boolean)
+  # options: true|false
+  # explanation: produce debug visualizations / intermediate files for debugging
+  generate_debug_outputs: false
+
+  qa_thresholds:
+    # Maximum percent of near-misses not snapped (float 0..100)
+    # explanation: threshold to fail QA if too many near-misses remain
+    max_unsnapped_near_miss_pct: 0.1
+
+    # Minimum success rate for width parsing (float 0..1)
+    # explanation: fraction of features where width was parsed successfully
+    min_width_parse_success_rate: 0.7
+
+    # Maximum percent of crossing edges without nodes (float 0..100)
+    max_crossing_edges_pct: 1.0
+
+caching:
+  # Enable parameter-based caching (boolean)
+  # options: true|false
+  # explanation: reuse intermediate files keyed by processing parameters
+  enable_parameter_based_caching: true
+
+  # Directory for intermediate cache files (string)
+  # explanation: path where cached artifacts are stored (relative or absolute)
+  cache_directory: "./intermediate"
+
+  # Reuse extraction when possible (boolean)
+  # options: true|false
+  # explanation: if true, skip extraction step when cache matches parameters
+  reuse_extraction: true
+
+# Test region definitions for rapid testing (bbox format: [min_lon, min_lat, max_lon, max_lat])
+test_regions:
+  test_urban:
+    name: "Dense urban canal network"
+    bbox: [4.8, 52.3, 4.9, 52.4]         # Amsterdam area
+
+  test_delta:
+    name: "Complex river delta"
+    bbox: [3.0, 51.5, 4.5, 52.0]         # Rhine delta
+
+  test_mountain:
+    name: "Sparse mountain streams"
+    bbox: [7.0, 46.0, 8.0, 47.0]         # Swiss Alps
+
+  test_arctic:
+    name: "High-latitude validation"
+    bbox: [10.0, 68.0, 11.0, 69.0]       # Northern Norway
+
+# Notes:
+# - Comments above fields show typical options and brief explanations.
+# - To add new options or change behavior (e.g., explicit compression_method), add the keys under the relevant section.
+# - Keep numeric units in comments (meters, MB, etc.)

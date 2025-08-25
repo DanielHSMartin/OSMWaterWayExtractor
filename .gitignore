@@ -1,1 +1,10 @@
 *.pbf
+*.parquet
+*.csv.gz
+*.geojson
+*.json
+*.gz
+!config.yaml
+intermediate/
+__pycache__/
+venv/
