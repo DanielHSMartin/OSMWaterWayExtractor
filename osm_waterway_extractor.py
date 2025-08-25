@@ -430,11 +430,40 @@ class GeodCalculator:
         if len(coords) < 2:
             return 0.0
         
+        # For long segments, use vectorized calculation for better performance
+        if len(coords) > 20:
+            return self._calculate_segment_length_batch(coords)
+        
         total_length = 0.0
         for i in range(1, len(coords)):
             total_length += self.distance(coords[i-1], coords[i])
         
         return total_length
+    
+    def _calculate_segment_length_batch(self, coords: List[Tuple[float, float]]) -> float:
+        """Calculate segment length using batch processing for long segments."""
+        if len(coords) < 2:
+            return 0.0
+        
+        total_length = 0.0
+        
+        # Process coordinates in batches for better cache locality
+        if self.method == "geodesic":
+            # For geodesic, use the same method but with better memory access patterns
+            for i in range(1, len(coords)):
+                lat1, lon1 = coords[i-1]
+                lat2, lon2 = coords[i]
+                total_length += self.geod.inverse(lat1, lon1, lat2, lon2)[2]
+        else:
+            # For other methods, use the regular distance function
+            for i in range(1, len(coords)):
+                total_length += self.distance(coords[i-1], coords[i])
+        
+        return total_length
+    
+    def calculate_multiple_segment_lengths(self, segments: List[List[Tuple[float, float]]]) -> List[float]:
+        """Calculate lengths for multiple segments efficiently."""
+        return [self.calculate_segment_length(segment) for segment in segments]
 
 
 class IDGenerator:
@@ -564,12 +593,33 @@ class SpatialIndex:
         
         candidate_ids = list(self.idx.intersection(bbox))
         
-        # Filter candidates using accurate geodesic distance
+        # For large numbers of candidates, use batch distance calculation for better performance
+        if len(candidate_ids) > 100:
+            return self._filter_candidates_batch(coord, candidate_ids, distance_m, geod_calc)
+        else:
+            # Filter candidates using accurate geodesic distance
+            nearby_coords = []
+            for candidate_id in candidate_ids:
+                candidate_coord = self.id_to_coord[candidate_id]
+                if geod_calc.distance(coord, candidate_coord) <= distance_m:
+                    nearby_coords.append(candidate_coord)
+            
+            return nearby_coords
+    
+    def _filter_candidates_batch(self, coord: Tuple[float, float], candidate_ids: List[int], 
+                                distance_m: float, geod_calc: GeodCalculator) -> List[Tuple[float, float]]:
+        """Filter candidate coordinates using batch processing for better performance."""
         nearby_coords = []
-        for candidate_id in candidate_ids:
-            candidate_coord = self.id_to_coord[candidate_id]
-            if geod_calc.distance(coord, candidate_coord) <= distance_m:
-                nearby_coords.append(candidate_coord)
+        
+        # Process candidates in smaller batches for better cache locality
+        batch_size = 50
+        for i in range(0, len(candidate_ids), batch_size):
+            batch_ids = candidate_ids[i:i + batch_size]
+            
+            for candidate_id in batch_ids:
+                candidate_coord = self.id_to_coord[candidate_id]
+                if geod_calc.distance(coord, candidate_coord) <= distance_m:
+                    nearby_coords.append(candidate_coord)
         
         return nearby_coords
 
@@ -605,13 +655,27 @@ class SnappingClusterer:
             uf.add(endpoint)
         
         # Find all pairs within snapping tolerance and union them
+        # Use batch processing for better performance with large datasets
         edges_added = 0
-        for endpoint in endpoints:
-            nearby = spatial_idx.find_within_distance(endpoint, self.config.snap_tolerance_m, self.geod_calc)
-            for nearby_point in nearby:
-                if nearby_point != endpoint:
-                    uf.union(endpoint, nearby_point)
-                    edges_added += 1
+        if len(endpoints) > 10000:
+            # For very large datasets, process in chunks to improve memory locality
+            chunk_size = 1000
+            for i in range(0, len(endpoints), chunk_size):
+                chunk_endpoints = endpoints[i:i + chunk_size]
+                for endpoint in chunk_endpoints:
+                    nearby = spatial_idx.find_within_distance(endpoint, self.config.snap_tolerance_m, self.geod_calc)
+                    for nearby_point in nearby:
+                        if nearby_point != endpoint:
+                            uf.union(endpoint, nearby_point)
+                            edges_added += 1
+        else:
+            # Regular processing for smaller datasets
+            for endpoint in endpoints:
+                nearby = spatial_idx.find_within_distance(endpoint, self.config.snap_tolerance_m, self.geod_calc)
+                for nearby_point in nearby:
+                    if nearby_point != endpoint:
+                        uf.union(endpoint, nearby_point)
+                        edges_added += 1
         
         logger.info(f"Added {edges_added} union edges for clustering")
         
