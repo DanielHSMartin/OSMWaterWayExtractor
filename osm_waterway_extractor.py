@@ -453,7 +453,8 @@ class GeodCalculator:
             for i in range(1, len(coords)):
                 lat1, lon1 = coords[i-1]
                 lat2, lon2 = coords[i]
-                total_length += self.geod.inverse(lat1, lon1, lat2, lon2)[2]
+                # Geod.inv expects (lon1, lat1, lon2, lat2) and returns (az12, az21, dist)
+                total_length += self.geod.inv(lon1, lat1, lon2, lat2)[2]
         else:
             # For other methods, use the regular distance function
             for i in range(1, len(coords)):
