@@ -4,7 +4,7 @@ processing:
   # Snap tolerance in meters (float)
   # options: any positive float (typical: 0.5, 1.0, 2.0, 5.0)
   # explanation: maximum distance to move vertices to snap to nearby nodes/edges
-  snap_tolerance_m: 2.0
+  snap_tolerance_m: 5.0
 
   # Minimum fragment/edge length in meters (float)
   # options: any non-negative float (typical: 10.0, 50.0, 100.0)
@@ -14,7 +14,7 @@ processing:
   # Coordinate precision (integer)
   # options: 0..12 (higher -> more decimal places; ~6 gives ~0.1m at equator)
   # explanation: controls rounding/serialization precision of coordinates
-  coordinate_precision: 6
+  coordinate_precision: 5
 
   # Parallel workers (integer)
   # options: 1..N (N = CPU cores). use 1 for single-threaded, >1 for parallel
@@ -44,7 +44,7 @@ processing:
   # Geometry simplification tolerance in meters (float)
   # options: any positive float (typical: 0.5, 1.0, 2.0, 5.0)
   # explanation: maximum distance to move vertices during simplification
-  simplification_tolerance_m: 1.0
+  simplification_tolerance_m: 5.0
 
 clustering:
   # Maximum allowed displacement multiplier relative to snap_tolerance_m (float)
