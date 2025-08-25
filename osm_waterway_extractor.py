@@ -1243,7 +1243,7 @@ class ManifestGenerator:
     @staticmethod
     def _calculate_file_hash(file_path: str) -> str:
         """Calculate SHA256 hash of a file."""
-        if not os.path.exists(file_path):
+        if not os.path.exists(file_path) or os.path.isdir(file_path):
             return ""
         
         sha256_hash = hashlib.sha256()
@@ -1264,8 +1264,22 @@ def get_cache_filename(input_file: str, config: Config) -> str:
 
 
 def get_output_base_filename(input_file: str) -> str:
-    """Generate base filename for outputs."""
-    return str(Path(input_file).with_suffix(''))
+    """Generate base filename for outputs, including directory structure."""
+    input_path = Path(input_file)
+    
+    # Create clean directory name, removing .osm.pbf or similar extensions
+    if input_path.name.endswith('.osm.pbf'):
+        directory_name = input_path.name.replace('.osm.pbf', '')
+    elif input_path.name.endswith('.osm'):
+        directory_name = input_path.stem
+    else:
+        directory_name = input_path.stem
+    
+    # Create the directory if it doesn't exist
+    os.makedirs(directory_name, exist_ok=True)
+    
+    # Return the base path inside the directory
+    return str(Path(directory_name) / directory_name)
 
 
 def create_test_waterways() -> List[Dict]:

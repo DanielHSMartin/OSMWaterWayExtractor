@@ -3,6 +3,7 @@
 *.csv.gz
 *.geojson
 *.json
+*.gz
 !config.yaml
 intermediate/
 __pycache__/
