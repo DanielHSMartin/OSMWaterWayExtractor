@@ -875,6 +875,7 @@ def _extract_endpoints_chunk(args):
     waterway_chunk, = args
     
     endpoint_count = Counter()
+    all_coordinates_count = Counter()
     all_endpoints = []
     
     # Count how many times each coordinate appears as an endpoint
@@ -886,8 +887,12 @@ def _extract_endpoints_chunk(args):
         endpoint_count[start_coord] += 1
         endpoint_count[end_coord] += 1
         all_endpoints.extend([start_coord, end_coord])
+        
+        # Also count ALL coordinates to detect interior intersections
+        for coord in coords:
+            all_coordinates_count[coord] += 1
     
-    return endpoint_count, all_endpoints
+    return endpoint_count, all_coordinates_count, all_endpoints
 
 
 class GeodCalculator:
@@ -1944,6 +1949,7 @@ class ModernWaterwayGraphBuilder:
         work_items = [(chunk,) for chunk in waterway_chunks]
         
         all_endpoint_counts = []
+        all_coordinates_counts = []
         all_endpoints = []
         
         with multiprocessing.Pool(processes=self.config.parallel_workers) as pool:
@@ -1951,8 +1957,9 @@ class ModernWaterwayGraphBuilder:
                 chunk_results = pool.map(_extract_endpoints_chunk, work_items)
                 
                 # Collect results
-                for chunk_endpoint_count, chunk_endpoints in chunk_results:
+                for chunk_endpoint_count, chunk_all_coords_count, chunk_endpoints in chunk_results:
                     all_endpoint_counts.append(chunk_endpoint_count)
+                    all_coordinates_counts.append(chunk_all_coords_count)
                     all_endpoints.extend(chunk_endpoints)
                     
             except Exception as e:
@@ -1966,16 +1973,27 @@ class ModernWaterwayGraphBuilder:
         for count_dict in all_endpoint_counts:
             endpoint_count.update(count_dict)
         
-        # Coordinates that appear more than once are junctions
-        junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        # Merge all coordinate counts
+        all_coordinates_count = Counter()
+        for count_dict in all_coordinates_counts:
+            all_coordinates_count.update(count_dict)
+        
+        # Coordinates that appear more than once are junctions (includes both endpoint and interior junctions)
+        endpoint_junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        interior_junctions = [coord for coord, count in all_coordinates_count.items() 
+                             if count > 1 and coord not in endpoint_junctions]
+        
+        # Combine both types of junctions
+        all_junctions = endpoint_junctions + interior_junctions
         endpoints = list(set(all_endpoints))
         
-        logger.info(f"Found {len(endpoints)} unique endpoints, {len(junctions)} junctions")
-        return endpoints, junctions
+        logger.info(f"Found {len(endpoints)} unique endpoints, {len(endpoint_junctions)} endpoint junctions, {len(interior_junctions)} interior junctions")
+        return endpoints, all_junctions
     
     def _extract_endpoints_sequential(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
-        """Extract endpoints sequentially (original implementation)."""
+        """Extract endpoints sequentially and detect intersection junctions."""
         endpoint_count = Counter()
+        all_coordinates_count = Counter()  # Count ALL coordinates, not just endpoints
         all_endpoints = []
         
         # Count how many times each coordinate appears as an endpoint
@@ -1987,13 +2005,22 @@ class ModernWaterwayGraphBuilder:
             endpoint_count[start_coord] += 1
             endpoint_count[end_coord] += 1
             all_endpoints.extend([start_coord, end_coord])
+            
+            # Also count ALL coordinates to detect interior intersections
+            for coord in coords:
+                all_coordinates_count[coord] += 1
         
-        # Coordinates that appear more than once are junctions
-        junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        # Coordinates that appear more than once are junctions (includes both endpoint and interior junctions)
+        endpoint_junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        interior_junctions = [coord for coord, count in all_coordinates_count.items() 
+                             if count > 1 and coord not in endpoint_junctions]
+        
+        # Combine both types of junctions
+        all_junctions = endpoint_junctions + interior_junctions
         endpoints = list(set(all_endpoints))
         
-        logger.info(f"Found {len(endpoints)} unique endpoints, {len(junctions)} junctions")
-        return endpoints, junctions
+        logger.info(f"Found {len(endpoints)} unique endpoints, {len(endpoint_junctions)} endpoint junctions, {len(interior_junctions)} interior junctions")
+        return endpoints, all_junctions
     
     def _extract_endpoints_parallel(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract endpoints using parallel processing for improved performance."""
@@ -2002,6 +2029,7 @@ class ModernWaterwayGraphBuilder:
         waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
         
         all_endpoint_counts = []
+        all_coordinates_counts = []
         all_endpoints = []
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.parallel_workers) as executor:
@@ -2015,14 +2043,16 @@ class ModernWaterwayGraphBuilder:
             for future in concurrent.futures.as_completed(future_to_chunk):
                 chunk = future_to_chunk[future]
                 try:
-                    chunk_endpoint_count, chunk_endpoints = future.result()
+                    chunk_endpoint_count, chunk_all_coords_count, chunk_endpoints = future.result()
                     all_endpoint_counts.append(chunk_endpoint_count)
+                    all_coordinates_counts.append(chunk_all_coords_count)
                     all_endpoints.extend(chunk_endpoints)
                 except Exception as e:
                     logger.error(f"Error extracting endpoints from chunk of size {len(chunk)}: {e}")
                     # Fall back to sequential processing for this chunk
-                    chunk_endpoint_count, chunk_endpoints = self._extract_endpoints_chunk(chunk)
+                    chunk_endpoint_count, chunk_all_coords_count, chunk_endpoints = self._extract_endpoints_chunk(chunk)
                     all_endpoint_counts.append(chunk_endpoint_count)
+                    all_coordinates_counts.append(chunk_all_coords_count)
                     all_endpoints.extend(chunk_endpoints)
         
         # Merge all endpoint counts
@@ -2030,16 +2060,27 @@ class ModernWaterwayGraphBuilder:
         for count_dict in all_endpoint_counts:
             endpoint_count.update(count_dict)
         
-        # Coordinates that appear more than once are junctions
-        junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        # Merge all coordinate counts
+        all_coordinates_count = Counter()
+        for count_dict in all_coordinates_counts:
+            all_coordinates_count.update(count_dict)
+        
+        # Coordinates that appear more than once are junctions (includes both endpoint and interior junctions)
+        endpoint_junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        interior_junctions = [coord for coord, count in all_coordinates_count.items() 
+                             if count > 1 and coord not in endpoint_junctions]
+        
+        # Combine both types of junctions
+        all_junctions = endpoint_junctions + interior_junctions
         endpoints = list(set(all_endpoints))
         
-        logger.info(f"Found {len(endpoints)} unique endpoints, {len(junctions)} junctions")
-        return endpoints, junctions
+        logger.info(f"Found {len(endpoints)} unique endpoints, {len(endpoint_junctions)} endpoint junctions, {len(interior_junctions)} interior junctions")
+        return endpoints, all_junctions
     
-    def _extract_endpoints_chunk(self, waterway_chunk: List[Dict]) -> Tuple[Counter, List[Tuple[float, float]]]:
+    def _extract_endpoints_chunk(self, waterway_chunk: List[Dict]) -> Tuple[Counter, Counter, List[Tuple[float, float]]]:
         """Extract endpoints from a chunk of waterways."""
         endpoint_count = Counter()
+        all_coordinates_count = Counter()
         all_endpoints = []
         
         # Count how many times each coordinate appears as an endpoint
@@ -2051,8 +2092,12 @@ class ModernWaterwayGraphBuilder:
             endpoint_count[start_coord] += 1
             endpoint_count[end_coord] += 1
             all_endpoints.extend([start_coord, end_coord])
+            
+            # Also count ALL coordinates to detect interior intersections
+            for coord in coords:
+                all_coordinates_count[coord] += 1
         
-        return endpoint_count, all_endpoints
+        return endpoint_count, all_coordinates_count, all_endpoints
     
     def _create_edges(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
         """Create edges with accurate geodesic distances and deterministic IDs."""
