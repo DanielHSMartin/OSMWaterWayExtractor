@@ -568,23 +568,6 @@ def _process_waterway_batch_optimized(args):
     return _process_waterway_batch_for_edges(batch_args)
 
 def _split_waterway_collect_segments(coords, way_id, tags, coord_mapping, config_dict):
-    """Process a batch of waterways with optimized coordinate mapping"""
-    waterway_batch, optimized_coord_mapping, config_dict = args
-    
-    # Restore coordinate mapping
-    coord_mapping = _restore_coord_mapping(optimized_coord_mapping)
-    
-    # Add identity mappings for coordinates not in the optimized mapping
-    all_coords = set()
-    for waterway in waterway_batch:
-        all_coords.update(waterway['coordinates'])
-    
-    for coord in all_coords:
-        if coord not in coord_mapping:
-            coord_mapping[coord] = coord
-    
-    # Process as before
-    return _process_waterway_batch_for_edges((waterway_batch, coord_mapping, config_dict))
     """Split a waterway into segments and collect metadata (without calculating lengths)"""
     if len(coords) < 2:
         return []
