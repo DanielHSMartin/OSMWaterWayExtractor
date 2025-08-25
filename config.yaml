@@ -116,7 +116,7 @@ output:
   # Generate ID mapping file (boolean)
   # options: true|false
   # explanation: generate mapping between deterministic and mobile IDs
-  generate_id_mapping: true
+  generate_id_mapping: false
 
   # Generate manifest file (boolean)
   # options: true|false
