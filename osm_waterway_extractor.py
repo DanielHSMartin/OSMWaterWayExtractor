@@ -895,6 +895,89 @@ def _extract_endpoints_chunk(args):
     return endpoint_count, all_coordinates_count, all_endpoints
 
 
+def _split_waterways_chunk(waterway_chunk, intersection_points, config_dict):
+    """Split waterways chunk for multiprocessing."""
+    from shapely.geometry import LineString, Point
+    
+    modified_waterways = []
+    split_count = 0
+    coordinate_precision = config_dict['coordinate_precision']
+    snap_tolerance_m = config_dict['snap_tolerance_m']
+    
+    for waterway in waterway_chunk:
+        coords = waterway['coordinates']
+        if len(coords) < 2:
+            modified_waterways.append(waterway)
+            continue
+            
+        # Create LineString for this waterway
+        line = LineString([(lon, lat) for lat, lon in coords])
+        
+        # Find intersection points that lie on this line
+        points_on_line = []
+        for int_lat, int_lon in intersection_points:
+            int_point = Point(int_lon, int_lat)
+            
+            # Check if intersection point lies on this line (with small tolerance for floating point precision)
+            distance_to_line = line.distance(int_point)
+            tolerance_degrees = snap_tolerance_m * 0.00001  # rough conversion to degrees
+            
+            if distance_to_line < tolerance_degrees:
+                # Find the position along the line where this intersection occurs
+                position = line.project(int_point)
+                points_on_line.append((position, int_lat, int_lon))
+                
+        if not points_on_line:
+            # No intersections on this waterway
+            modified_waterways.append(waterway)
+            continue
+            
+        # Sort intersection points by their position along the line
+        points_on_line.sort(key=lambda x: x[0])
+        
+        # Insert intersection points into the coordinate sequence
+        new_coords = []
+        
+        for i, coord in enumerate(coords):
+            new_coords.append(coord)
+            
+            # If not the last coordinate, check for intersections in the next segment
+            if i < len(coords) - 1:
+                next_coord = coords[i + 1]
+                current_segment_start = line.project(Point(coord[1], coord[0]))
+                current_segment_end = line.project(Point(next_coord[1], next_coord[0]))
+                
+                # Find intersection points that fall within this segment
+                for position, int_lat, int_lon in points_on_line:
+                    point_distance = position
+                    
+                    # Check if intersection point is in this segment
+                    if current_segment_start < point_distance < current_segment_end:
+                        # Round to the configured precision
+                        rounded_lat = round(int_lat, coordinate_precision)
+                        rounded_lon = round(int_lon, coordinate_precision)
+                        
+                        # Only add if it's not already present (avoid duplicates)
+                        if (rounded_lat, rounded_lon) not in new_coords:
+                            new_coords.append((rounded_lat, rounded_lon))
+                            split_count += 1
+        
+        # Remove consecutive duplicate coordinates
+        deduplicated_coords = [new_coords[0]] if new_coords else []
+        for coord in new_coords[1:]:
+            if coord != deduplicated_coords[-1]:
+                deduplicated_coords.append(coord)
+        
+        # Create updated waterway with intersection points inserted
+        modified_waterways.append({
+            'id': waterway['id'],
+            'coordinates': deduplicated_coords,
+            'tags': waterway['tags']
+        })
+    
+    return modified_waterways, split_count
+
+
 class GeodCalculator:
     """Handles accurate geodesic distance calculations."""
     
@@ -1922,6 +2005,138 @@ class ModernWaterwayGraphBuilder:
             
         logger.info(f"Inserted {split_count} intersection points into waterway coordinate sequences")
         return modified_waterways
+    
+    def _split_waterways_at_intersections(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
+        """Split waterways by inserting intersection points into their coordinate sequences."""
+        if not intersection_points:
+            return waterways
+            
+        # Use multiprocessing for large datasets (same threshold as other operations)
+        if self.config.parallel_workers > 1 and len(waterways) > 500 and len(intersection_points) > 100:
+            logger.info(f"Splitting {len(waterways)} waterways at {len(intersection_points)} intersection points using {self.config.parallel_workers} parallel workers")
+            try:
+                return self._split_waterways_multiprocessing(waterways, intersection_points)
+            except Exception as e:
+                logger.warning(f"Multiprocessing failed ({e}), falling back to sequential splitting")
+                return self._split_waterways_sequential(waterways, intersection_points)
+        else:
+            logger.info(f"Splitting waterways at {len(intersection_points)} intersection points sequentially")
+            return self._split_waterways_sequential(waterways, intersection_points)
+    
+    def _split_waterways_sequential(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
+        """Sequential implementation of waterway splitting."""
+        modified_waterways = []
+        split_count = 0
+        
+        for waterway in waterways:
+            coords = waterway['coordinates']
+            if len(coords) < 2:
+                modified_waterways.append(waterway)
+                continue
+                
+            # Create LineString for this waterway
+            line = LineString([(lon, lat) for lat, lon in coords])
+            
+            # Find intersection points that lie on this line
+            points_on_line = []
+            for int_lat, int_lon in intersection_points:
+                int_point = Point(int_lon, int_lat)
+                
+                # Check if intersection point lies on this line (with small tolerance for floating point precision)
+                distance_to_line = line.distance(int_point)
+                tolerance_degrees = self.config.snap_tolerance_m * 0.00001  # rough conversion to degrees
+                
+                if distance_to_line < tolerance_degrees:
+                    # Find the position along the line where this intersection occurs
+                    position = line.project(int_point)
+                    points_on_line.append((position, int_lat, int_lon))
+                    
+            if not points_on_line:
+                # No intersections on this waterway
+                modified_waterways.append(waterway)
+                continue
+                
+            # Sort intersection points by their position along the line
+            points_on_line.sort(key=lambda x: x[0])
+            
+            # Insert intersection points into the coordinate sequence
+            new_coords = []
+            
+            for i, coord in enumerate(coords):
+                new_coords.append(coord)
+                
+                # If not the last coordinate, check for intersections in the next segment
+                if i < len(coords) - 1:
+                    next_coord = coords[i + 1]
+                    current_segment_start = line.project(Point(coord[1], coord[0]))
+                    current_segment_end = line.project(Point(next_coord[1], next_coord[0]))
+                    
+                    # Find intersection points that fall within this segment
+                    for position, int_lat, int_lon in points_on_line:
+                        point_distance = position
+                        
+                        # Check if intersection point is in this segment
+                        if current_segment_start < point_distance < current_segment_end:
+                            # Round to the configured precision
+                            rounded_lat = round(int_lat, self.config.coordinate_precision)
+                            rounded_lon = round(int_lon, self.config.coordinate_precision)
+                            
+                            # Only add if it's not already present (avoid duplicates)
+                            if (rounded_lat, rounded_lon) not in new_coords:
+                                new_coords.append((rounded_lat, rounded_lon))
+                                split_count += 1
+                                logger.debug(f"Inserted intersection point ({rounded_lat:.6f}, {rounded_lon:.6f}) into waterway {waterway['id']}")
+            
+            # Remove consecutive duplicate coordinates
+            deduplicated_coords = [new_coords[0]] if new_coords else []
+            for coord in new_coords[1:]:
+                if coord != deduplicated_coords[-1]:
+                    deduplicated_coords.append(coord)
+            
+            # Create updated waterway with intersection points inserted
+            modified_waterways.append({
+                'id': waterway['id'],
+                'coordinates': deduplicated_coords,
+                'tags': waterway['tags']
+            })
+            
+        logger.info(f"Inserted {split_count} intersection points into waterway coordinate sequences")
+        return modified_waterways
+    
+    def _split_waterways_multiprocessing(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
+        """Split waterways using multiprocessing for improved performance."""
+        import multiprocessing as mp
+        from functools import partial
+        
+        try:
+            # Prepare configuration for worker processes
+            config_dict = asdict(self.config)
+            
+            # Create chunks of waterways for parallel processing
+            chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+            waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+            
+            logger.info(f"Processing {len(waterway_chunks)} chunks with {self.config.parallel_workers} workers")
+            
+            # Process chunks in parallel
+            with mp.Pool(processes=self.config.parallel_workers) as pool:
+                worker_func = partial(_split_waterways_chunk, intersection_points=intersection_points, config_dict=config_dict)
+                chunk_results = pool.map(worker_func, waterway_chunks)
+            
+            # Combine results from all chunks
+            modified_waterways = []
+            total_split_count = 0
+            
+            for waterways_result, split_count in chunk_results:
+                modified_waterways.extend(waterways_result)
+                total_split_count += split_count
+            
+            logger.info(f"Inserted {total_split_count} intersection points into waterway coordinate sequences using multiprocessing")
+            return modified_waterways
+            
+        except Exception as e:
+            logger.error(f"Error in multiprocessing waterway splitting: {e}")
+            raise
     
     def _extract_endpoints_and_junctions(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract unique endpoints and identify junction points."""
