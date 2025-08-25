@@ -839,6 +839,16 @@ class ModernWaterwayGraphBuilder:
     
     def _process_waterways(self, waterways: List[Dict]) -> List[Dict]:
         """Process waterway coordinates and apply coordinate precision."""
+        # Use parallel processing for better performance with large datasets
+        if self.config.parallel_workers > 1 and len(waterways) > 1000:
+            logger.info(f"Processing {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
+            return self._process_waterways_parallel(waterways)
+        else:
+            logger.info(f"Processing {len(waterways)} waterways sequentially")
+            return self._process_waterways_sequential(waterways)
+    
+    def _process_waterways_sequential(self, waterways: List[Dict]) -> List[Dict]:
+        """Process waterways sequentially (original implementation)."""
         processed = []
         
         for waterway in waterways:
@@ -869,12 +879,82 @@ class ModernWaterwayGraphBuilder:
         logger.info(f"Processed {len(processed)}/{len(waterways)} waterways after coordinate cleaning")
         return processed
     
+    def _process_waterways_parallel(self, waterways: List[Dict]) -> List[Dict]:
+        """Process waterways using parallel processing for improved performance."""
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        all_processed = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.parallel_workers) as executor:
+            # Submit tasks for each chunk
+            future_to_chunk = {
+                executor.submit(self._process_waterway_chunk_coordinates, chunk): chunk 
+                for chunk in waterway_chunks
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    chunk_processed = future.result()
+                    all_processed.extend(chunk_processed)
+                except Exception as e:
+                    logger.error(f"Error processing coordinate chunk of size {len(chunk)}: {e}")
+                    # Fall back to sequential processing for this chunk
+                    all_processed.extend(self._process_waterway_chunk_coordinates(chunk))
+        
+        logger.info(f"Processed {len(all_processed)}/{len(waterways)} waterways after coordinate cleaning")
+        return all_processed
+    
+    def _process_waterway_chunk_coordinates(self, waterway_chunk: List[Dict]) -> List[Dict]:
+        """Process a chunk of waterways for coordinate precision and deduplication."""
+        processed = []
+        
+        for waterway in waterway_chunk:
+            coords = waterway['coordinates']
+            if len(coords) < 2:
+                continue
+                
+            # Round coordinates to specified precision
+            rounded_coords = [
+                (round(lat, self.config.coordinate_precision), 
+                 round(lon, self.config.coordinate_precision))
+                for lat, lon in coords
+            ]
+            
+            # Remove consecutive duplicate coordinates
+            deduplicated_coords = [rounded_coords[0]]
+            for coord in rounded_coords[1:]:
+                if coord != deduplicated_coords[-1]:
+                    deduplicated_coords.append(coord)
+            
+            if len(deduplicated_coords) >= 2:
+                processed.append({
+                    'id': waterway['id'],
+                    'coordinates': deduplicated_coords,
+                    'tags': waterway['tags']
+                })
+        
+        return processed
+    
     def _simplify_geometries(self, waterways: List[Dict]) -> List[Dict]:
         """Simplify waterway geometries to reduce size while preserving topology."""
         if not self.config.enable_geometry_simplification:
             logger.info("Geometry simplification disabled, skipping...")
             return waterways
-            
+        
+        # Use parallel processing for better performance with large datasets
+        if self.config.parallel_workers > 1 and len(waterways) > 500:
+            logger.info(f"Simplifying {len(waterways)} geometries using {self.config.parallel_workers} parallel workers")
+            return self._simplify_geometries_parallel(waterways)
+        else:
+            logger.info(f"Simplifying {len(waterways)} geometries sequentially")
+            return self._simplify_geometries_sequential(waterways)
+    
+    def _simplify_geometries_sequential(self, waterways: List[Dict]) -> List[Dict]:
+        """Simplify geometries sequentially (original implementation)."""
         logger.info(f"Simplifying geometries with tolerance {self.config.simplification_tolerance_m}m")
         simplified = []
         
@@ -914,8 +994,85 @@ class ModernWaterwayGraphBuilder:
         logger.info(f"Simplified {len(simplified)}/{len(waterways)} waterways")
         return simplified
     
+    def _simplify_geometries_parallel(self, waterways: List[Dict]) -> List[Dict]:
+        """Simplify geometries using parallel processing for improved performance."""
+        logger.info(f"Simplifying geometries with tolerance {self.config.simplification_tolerance_m}m")
+        
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        all_simplified = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.parallel_workers) as executor:
+            # Submit tasks for each chunk
+            future_to_chunk = {
+                executor.submit(self._simplify_geometries_chunk, chunk): chunk 
+                for chunk in waterway_chunks
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    chunk_simplified = future.result()
+                    all_simplified.extend(chunk_simplified)
+                except Exception as e:
+                    logger.error(f"Error simplifying geometry chunk of size {len(chunk)}: {e}")
+                    # Fall back to sequential processing for this chunk
+                    all_simplified.extend(self._simplify_geometries_chunk(chunk))
+        
+        logger.info(f"Simplified {len(all_simplified)}/{len(waterways)} waterways")
+        return all_simplified
+    
+    def _simplify_geometries_chunk(self, waterway_chunk: List[Dict]) -> List[Dict]:
+        """Simplify a chunk of waterway geometries."""
+        simplified = []
+        tolerance_degrees = self.config.simplification_tolerance_m * 0.00001
+        
+        for waterway in waterway_chunk:
+            coords = waterway['coordinates']
+            if len(coords) < 2:
+                continue
+                
+            try:
+                # Convert to LineString
+                line = LineString([(lon, lat) for lat, lon in coords])
+                
+                # Simplify the geometry
+                simplified_line = line.simplify(tolerance_degrees, preserve_topology=True)
+                
+                # Convert back to coordinates
+                if simplified_line.geom_type == 'LineString':
+                    simplified_coords = [(lat, lon) for lon, lat in simplified_line.coords]
+                    
+                    # Ensure we still have at least 2 points
+                    if len(simplified_coords) >= 2:
+                        simplified.append({
+                            'id': waterway['id'],
+                            'coordinates': simplified_coords,
+                            'tags': waterway['tags']
+                        })
+                        
+            except Exception as e:
+                logger.debug(f"Error simplifying waterway {waterway['id']}: {e}")
+                # Fall back to original if simplification fails
+                simplified.append(waterway)
+        
+        return simplified
+    
     def _extract_endpoints_and_junctions(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Extract unique endpoints and identify junction points."""
+        # Use parallel processing for better performance with large datasets
+        if self.config.parallel_workers > 1 and len(waterways) > 1000:
+            logger.info(f"Extracting endpoints from {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
+            return self._extract_endpoints_parallel(waterways)
+        else:
+            logger.info(f"Extracting endpoints from {len(waterways)} waterways sequentially")
+            return self._extract_endpoints_sequential(waterways)
+    
+    def _extract_endpoints_sequential(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """Extract endpoints sequentially (original implementation)."""
         endpoint_count = Counter()
         all_endpoints = []
         
@@ -936,8 +1093,77 @@ class ModernWaterwayGraphBuilder:
         logger.info(f"Found {len(endpoints)} unique endpoints, {len(junctions)} junctions")
         return endpoints, junctions
     
+    def _extract_endpoints_parallel(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """Extract endpoints using parallel processing for improved performance."""
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        all_endpoint_counts = []
+        all_endpoints = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.parallel_workers) as executor:
+            # Submit tasks for each chunk
+            future_to_chunk = {
+                executor.submit(self._extract_endpoints_chunk, chunk): chunk 
+                for chunk in waterway_chunks
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    chunk_endpoint_count, chunk_endpoints = future.result()
+                    all_endpoint_counts.append(chunk_endpoint_count)
+                    all_endpoints.extend(chunk_endpoints)
+                except Exception as e:
+                    logger.error(f"Error extracting endpoints from chunk of size {len(chunk)}: {e}")
+                    # Fall back to sequential processing for this chunk
+                    chunk_endpoint_count, chunk_endpoints = self._extract_endpoints_chunk(chunk)
+                    all_endpoint_counts.append(chunk_endpoint_count)
+                    all_endpoints.extend(chunk_endpoints)
+        
+        # Merge all endpoint counts
+        endpoint_count = Counter()
+        for count_dict in all_endpoint_counts:
+            endpoint_count.update(count_dict)
+        
+        # Coordinates that appear more than once are junctions
+        junctions = [coord for coord, count in endpoint_count.items() if count > 1]
+        endpoints = list(set(all_endpoints))
+        
+        logger.info(f"Found {len(endpoints)} unique endpoints, {len(junctions)} junctions")
+        return endpoints, junctions
+    
+    def _extract_endpoints_chunk(self, waterway_chunk: List[Dict]) -> Tuple[Counter, List[Tuple[float, float]]]:
+        """Extract endpoints from a chunk of waterways."""
+        endpoint_count = Counter()
+        all_endpoints = []
+        
+        # Count how many times each coordinate appears as an endpoint
+        for waterway in waterway_chunk:
+            coords = waterway['coordinates']
+            start_coord = coords[0]
+            end_coord = coords[-1]
+            
+            endpoint_count[start_coord] += 1
+            endpoint_count[end_coord] += 1
+            all_endpoints.extend([start_coord, end_coord])
+        
+        return endpoint_count, all_endpoints
+    
     def _create_edges(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
         """Create edges with accurate geodesic distances and deterministic IDs."""
+        # Use parallel processing for better performance
+        if self.config.parallel_workers > 1 and len(waterways) > 100:
+            logger.info(f"Processing {len(waterways)} waterways using {self.config.parallel_workers} parallel workers")
+            return self._create_edges_parallel(waterways, coord_mapping)
+        else:
+            logger.info(f"Processing {len(waterways)} waterways sequentially")
+            return self._create_edges_sequential(waterways, coord_mapping)
+    
+    def _create_edges_sequential(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
+        """Create edges sequentially (original implementation)."""
         edges = []
         
         for waterway in waterways:
@@ -959,6 +1185,63 @@ class ModernWaterwayGraphBuilder:
         
         logger.info(f"Created {len(filtered_edges)}/{len(edges)} edges after length filtering")
         return filtered_edges
+    
+    def _create_edges_parallel(self, waterways: List[Dict], coord_mapping: Dict) -> List[Dict]:
+        """Create edges using parallel processing for improved performance."""
+        # Split waterways into chunks for parallel processing
+        chunk_size = max(1, len(waterways) // self.config.parallel_workers)
+        waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
+        
+        all_edges = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.parallel_workers) as executor:
+            # Submit tasks for each chunk
+            future_to_chunk = {
+                executor.submit(self._process_waterway_chunk, chunk, coord_mapping): chunk 
+                for chunk in waterway_chunks
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    chunk_edges = future.result()
+                    all_edges.extend(chunk_edges)
+                except Exception as e:
+                    logger.error(f"Error processing waterway chunk of size {len(chunk)}: {e}")
+                    # Fall back to sequential processing for this chunk
+                    for waterway in chunk:
+                        coords = waterway['coordinates']
+                        way_id = waterway['id']
+                        tags = waterway['tags']
+                        mapped_coords = [coord_mapping.get(coord, coord) for coord in coords]
+                        all_edges.extend(self._split_waterway_at_junctions(mapped_coords, way_id, tags, coord_mapping))
+        
+        # Filter by minimum length
+        filtered_edges = []
+        for edge in all_edges:
+            if edge['length_m'] >= self.config.min_fragment_length_m:
+                filtered_edges.append(edge)
+        
+        logger.info(f"Created {len(filtered_edges)}/{len(all_edges)} edges after length filtering")
+        return filtered_edges
+    
+    def _process_waterway_chunk(self, waterway_chunk: List[Dict], coord_mapping: Dict) -> List[Dict]:
+        """Process a chunk of waterways in parallel."""
+        edges = []
+        
+        for waterway in waterway_chunk:
+            coords = waterway['coordinates']
+            way_id = waterway['id']
+            tags = waterway['tags']
+            
+            # Apply coordinate mapping from clustering
+            mapped_coords = [coord_mapping.get(coord, coord) for coord in coords]
+            
+            # Split waterway at junction points
+            edges.extend(self._split_waterway_at_junctions(mapped_coords, way_id, tags, coord_mapping))
+        
+        return edges
     
     def _split_waterway_at_junctions(self, coords: List[Tuple[float, float]], way_id: int, 
                                    tags: Dict, coord_mapping: Dict) -> List[Dict]:
