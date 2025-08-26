@@ -896,13 +896,25 @@ def _extract_endpoints_chunk(args):
 
 
 def _split_waterways_chunk(waterway_chunk, intersection_points, config_dict):
-    """Split waterways chunk for multiprocessing."""
+    """Split waterways chunk for multiprocessing using spatial indexing for performance."""
     from shapely.geometry import LineString, Point
+    from rtree import index
     
     modified_waterways = []
     split_count = 0
     coordinate_precision = config_dict['coordinate_precision']
     snap_tolerance_m = config_dict['snap_tolerance_m']
+    tolerance_degrees = snap_tolerance_m * 0.00001  # rough conversion to degrees
+    
+    # Build spatial index for intersection points for O(log n) lookup instead of O(n)
+    spatial_idx = index.Index()
+    point_data = {}  # Store point data by index
+    
+    for i, (int_lat, int_lon) in enumerate(intersection_points):
+        # Create small bounding box around each intersection point
+        buffer = tolerance_degrees
+        spatial_idx.insert(i, (int_lon - buffer, int_lat - buffer, int_lon + buffer, int_lat + buffer))
+        point_data[i] = (int_lat, int_lon)
     
     for waterway in waterway_chunk:
         coords = waterway['coordinates']
@@ -912,15 +924,19 @@ def _split_waterways_chunk(waterway_chunk, intersection_points, config_dict):
             
         # Create LineString for this waterway
         line = LineString([(lon, lat) for lat, lon in coords])
+        line_bounds = line.bounds  # (minx, miny, maxx, maxy)
         
-        # Find intersection points that lie on this line
+        # Find intersection points near this waterway using spatial index (O(log n) instead of O(n))
+        candidate_indices = list(spatial_idx.intersection(line_bounds))
+        
+        # Only check intersection points that are spatially near this waterway
         points_on_line = []
-        for int_lat, int_lon in intersection_points:
+        for idx in candidate_indices:
+            int_lat, int_lon = point_data[idx]
             int_point = Point(int_lon, int_lat)
             
             # Check if intersection point lies on this line (with small tolerance for floating point precision)
             distance_to_line = line.distance(int_point)
-            tolerance_degrees = snap_tolerance_m * 0.00001  # rough conversion to degrees
             
             if distance_to_line < tolerance_degrees:
                 # Find the position along the line where this intersection occurs
@@ -1967,13 +1983,30 @@ class ModernWaterwayGraphBuilder:
             return self._split_waterways_sequential(waterways, intersection_points)
     
     def _split_waterways_sequential(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
-        """Sequential implementation of waterway splitting."""
+        """Sequential implementation of waterway splitting with spatial indexing optimization."""
+        from shapely.geometry import LineString, Point
+        from rtree import index
+        
         modified_waterways = []
         split_count = 0
         progress_interval = max(1, len(waterways) // 20)  # Report progress every 5%
         start_time = time.time()
+        tolerance_degrees = self.config.snap_tolerance_m * 0.00001  # rough conversion to degrees
         
         logger.info(f"Starting sequential processing of {len(waterways)} waterways with {len(intersection_points)} intersection points")
+        logger.info(f"Building spatial index for {len(intersection_points)} intersection points...")
+        
+        # Build spatial index for intersection points for O(log n) lookup instead of O(n)
+        spatial_idx = index.Index()
+        point_data = {}  # Store point data by index
+        
+        for i, (int_lat, int_lon) in enumerate(intersection_points):
+            # Create small bounding box around each intersection point
+            buffer = tolerance_degrees
+            spatial_idx.insert(i, (int_lon - buffer, int_lat - buffer, int_lon + buffer, int_lat + buffer))
+            point_data[i] = (int_lat, int_lon)
+        
+        logger.info(f"Spatial index built. Processing waterways with optimized intersection detection...")
         
         for idx, waterway in enumerate(waterways):
             # Report progress periodically
@@ -1992,15 +2025,19 @@ class ModernWaterwayGraphBuilder:
                 
             # Create LineString for this waterway
             line = LineString([(lon, lat) for lat, lon in coords])
+            line_bounds = line.bounds  # (minx, miny, maxx, maxy)
             
-            # Find intersection points that lie on this line
+            # Find intersection points near this waterway using spatial index (O(log n) instead of O(n))
+            candidate_indices = list(spatial_idx.intersection(line_bounds))
+            
+            # Only check intersection points that are spatially near this waterway
             points_on_line = []
-            for int_lat, int_lon in intersection_points:
+            for i in candidate_indices:
+                int_lat, int_lon = point_data[i]
                 int_point = Point(int_lon, int_lat)
                 
                 # Check if intersection point lies on this line (with small tolerance for floating point precision)
                 distance_to_line = line.distance(int_point)
-                tolerance_degrees = self.config.snap_tolerance_m * 0.00001  # rough conversion to degrees
                 
                 if distance_to_line < tolerance_degrees:
                     # Find the position along the line where this intersection occurs
@@ -2074,7 +2111,7 @@ class ModernWaterwayGraphBuilder:
             waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
             
             logger.info(f"Processing {len(waterway_chunks)} chunks of ~{chunk_size} waterways each with {self.config.parallel_workers} workers")
-            logger.info(f"Estimated processing time: ~{len(waterways) * len(intersection_points) // 50000 + 10} seconds for {len(waterways)} waterways × {len(intersection_points)} intersection points")
+            logger.info(f"Estimated processing time: ~{len(waterways) // 10000 + 5} seconds for {len(waterways)} waterways × {len(intersection_points)} intersection points (optimized with spatial indexing)")
             
             # Process chunks in parallel with progress monitoring
             start_time = time.time()
