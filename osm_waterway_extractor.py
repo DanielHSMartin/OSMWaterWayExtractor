@@ -1819,6 +1819,13 @@ class ModernWaterwayGraphBuilder:
         """Detect line intersections and split waterways at intersection points (Specification 3.5)."""
         if len(waterways) < 2:
             logger.info("Less than 2 waterways, skipping intersection detection")
+            # Store empty intersection metrics
+            self.qa_metrics.update({
+                'intersection_points_detected': 0,
+                'intersection_points_inserted': 0,
+                'waterways_with_intersections': 0,
+                'waterways_without_intersections': len(waterways)
+            })
             return waterways
             
         logger.info(f"Detecting intersections between {len(waterways)} waterways...")
@@ -1894,12 +1901,20 @@ class ModernWaterwayGraphBuilder:
                         
             logger.info(f"Found {len(intersection_points)} intersection points affecting {len(intersected_waterways)} waterways")
             
+            # Store intersection metrics
+            self.qa_metrics.update({
+                'intersection_points_detected': len(intersection_points),
+                'waterways_with_intersections': len(intersected_waterways),
+                'waterways_without_intersections': len(waterways) - len(intersected_waterways)
+            })
+            
             if not intersection_points:
                 logger.info("No intersections found, returning original waterways")
                 return waterways
                 
             # Split waterways at intersection points
-            return self._split_waterways_at_intersections(waterways, intersection_points)
+            result = self._split_waterways_at_intersections(waterways, intersection_points)
+            return result
             
         except ImportError:
             logger.warning("rtree not available, falling back to basic intersection detection")
@@ -1907,6 +1922,13 @@ class ModernWaterwayGraphBuilder:
         except Exception as e:
             logger.error(f"Error in intersection detection: {e}")
             logger.warning("Falling back to original waterways without intersection detection")
+            # Store empty intersection metrics for error case
+            self.qa_metrics.update({
+                'intersection_points_detected': 0,
+                'intersection_points_inserted': 0,
+                'waterways_with_intersections': 0,
+                'waterways_without_intersections': len(waterways)
+            })
             return waterways
     
     def _detect_intersections_basic(self, waterways: List[Dict]) -> List[Dict]:
@@ -1958,29 +1980,61 @@ class ModernWaterwayGraphBuilder:
         total_time = time.time() - start_time
         logger.info(f"Completed basic intersection detection: found {len(intersection_points)} intersection points in {total_time:.1f}s")
         
+        # Store intersection metrics (note: basic method doesn't track which waterways are affected)
+        affected_waterways = set()
+        for i in range(len(waterways)):
+            for j in range(i + 1, len(waterways)):
+                try:
+                    coords_i = waterways[i]['coordinates']
+                    coords_j = waterways[j]['coordinates']
+                    if len(coords_i) >= 2 and len(coords_j) >= 2:
+                        line_i = LineString([(lon, lat) for lat, lon in coords_i])
+                        line_j = LineString([(lon, lat) for lat, lon in coords_j])
+                        intersection = line_i.intersection(line_j)
+                        if not intersection.is_empty and intersection.geom_type == 'Point':
+                            affected_waterways.add(i)
+                            affected_waterways.add(j)
+                except:
+                    continue
+        
+        self.qa_metrics.update({
+            'intersection_points_detected': len(intersection_points),
+            'waterways_with_intersections': len(affected_waterways),
+            'waterways_without_intersections': len(waterways) - len(affected_waterways)
+        })
+        
         if not intersection_points:
+            self.qa_metrics['intersection_points_inserted'] = 0
             return waterways
             
-        return self._split_waterways_at_intersections(waterways, intersection_points)
+        result = self._split_waterways_at_intersections(waterways, intersection_points)
+        return result
     
 
     
     def _split_waterways_at_intersections(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
         """Split waterways by inserting intersection points into their coordinate sequences."""
         if not intersection_points:
+            self.qa_metrics['intersection_points_inserted'] = 0
             return waterways
             
         # Use multiprocessing for large datasets (same threshold as other operations)
         if self.config.parallel_workers > 1 and len(waterways) > 500 and len(intersection_points) > 100:
             logger.info(f"Splitting {len(waterways)} waterways at {len(intersection_points)} intersection points using {self.config.parallel_workers} parallel workers")
             try:
-                return self._split_waterways_multiprocessing(waterways, intersection_points)
+                result_waterways, split_count = self._split_waterways_multiprocessing(waterways, intersection_points)
+                self.qa_metrics['intersection_points_inserted'] = split_count
+                return result_waterways
             except Exception as e:
                 logger.warning(f"Multiprocessing failed ({e}), falling back to sequential splitting")
-                return self._split_waterways_sequential(waterways, intersection_points)
+                result_waterways, split_count = self._split_waterways_sequential(waterways, intersection_points)
+                self.qa_metrics['intersection_points_inserted'] = split_count
+                return result_waterways
         else:
             logger.info(f"Splitting waterways at {len(intersection_points)} intersection points sequentially")
-            return self._split_waterways_sequential(waterways, intersection_points)
+            result_waterways, split_count = self._split_waterways_sequential(waterways, intersection_points)
+            self.qa_metrics['intersection_points_inserted'] = split_count
+            return result_waterways
     
     def _split_waterways_sequential(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
         """Sequential implementation of waterway splitting with spatial indexing optimization."""
@@ -2095,7 +2149,7 @@ class ModernWaterwayGraphBuilder:
             
         total_time = time.time() - start_time
         logger.info(f"Completed sequential processing: inserted {split_count} intersection points into {len(modified_waterways)} waterway coordinate sequences in {total_time:.1f}s")
-        return modified_waterways
+        return modified_waterways, split_count
     
     def _split_waterways_multiprocessing(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
         """Split waterways using multiprocessing for improved performance."""
@@ -2141,7 +2195,7 @@ class ModernWaterwayGraphBuilder:
             
             total_time = time.time() - start_time
             logger.info(f"Completed waterway splitting: inserted {total_split_count} intersection points into {len(modified_waterways)} waterway coordinate sequences in {total_time:.1f}s using multiprocessing")
-            return modified_waterways
+            return modified_waterways, total_split_count
             
         except Exception as e:
             logger.error(f"Error in multiprocessing waterway splitting: {e}")
@@ -2944,10 +2998,19 @@ class ManifestGenerator:
                 'output_files': file_sizes
             },
             'qa_summary': {
+                'intersection_detection': {
+                    'intersection_points_detected': qa_metrics.get('intersection_points_detected', 0),
+                    'intersection_points_inserted': qa_metrics.get('intersection_points_inserted', 0),
+                    'waterways_with_intersections': qa_metrics.get('waterways_with_intersections', 0),
+                    'waterways_without_intersections': qa_metrics.get('waterways_without_intersections', 0)
+                },
                 'clustering': {
                     'total_clusters': qa_metrics.get('total_clusters', 0),
                     'displacement_p95_m': qa_metrics.get('displacement_p95_m', 0),
-                    'largest_cluster_size': qa_metrics.get('largest_cluster_size', 0)
+                    'largest_cluster_size': qa_metrics.get('largest_cluster_size', 0),
+                    'endpoints_clustered': qa_metrics.get('endpoints_clustered', 0),
+                    'junctions_clustered': qa_metrics.get('junctions_clustered', 0),
+                    'coordinates_snapped': qa_metrics.get('coordinates_snapped', 0)
                 },
                 'quality': {
                     'width_parse_success_rate': qa_metrics.get('width_parse_success_rate', 0),
@@ -3215,6 +3278,17 @@ Attribution:
         print(f"  Clusters formed: {graph_builder.qa_metrics.get('total_clusters', 0)}")
         print(f"  Width parse success: {graph_builder.qa_metrics.get('width_parse_success_rate', 0):.1f}%")
         print(f"  Mean edge length: {graph_builder.qa_metrics.get('mean_edge_length_m', 0):.1f}m")
+        
+        print(f"\nIntersection Detection & Splitting:")
+        print(f"  Intersection points detected: {graph_builder.qa_metrics.get('intersection_points_detected', 0):,}")
+        print(f"  Intersection points inserted: {graph_builder.qa_metrics.get('intersection_points_inserted', 0):,}")
+        print(f"  Waterways with intersections: {graph_builder.qa_metrics.get('waterways_with_intersections', 0):,}")
+        print(f"  Waterways without intersections: {graph_builder.qa_metrics.get('waterways_without_intersections', 0):,}")
+        
+        print(f"\nClustering & Snapping:")
+        print(f"  Endpoints clustered: {graph_builder.qa_metrics.get('endpoints_clustered', 0):,}")
+        print(f"  Junctions clustered: {graph_builder.qa_metrics.get('junctions_clustered', 0):,}")
+        print(f"  Coordinates snapped: {graph_builder.qa_metrics.get('coordinates_snapped', 0):,}")
         
         print(f"\nOutput files:")
         for filename, size in file_sizes.items():
