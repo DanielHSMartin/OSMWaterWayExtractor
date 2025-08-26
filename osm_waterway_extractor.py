@@ -1760,7 +1760,7 @@ class ModernWaterwayGraphBuilder:
                         intersection = line_i.intersection(line_j)
                         
                         if not intersection.is_empty:
-                            if intersection.geom_type == 'Point':
+                            if intersection.geom_type == 'Point' and isinstance(intersection, Point):
                                 # Single intersection point
                                 point = intersection
                                 lat, lon = point.y, point.x
@@ -1772,11 +1772,12 @@ class ModernWaterwayGraphBuilder:
                             elif intersection.geom_type == 'MultiPoint':
                                 # Multiple intersection points
                                 for point in intersection.geoms:
-                                    lat, lon = point.y, point.x
-                                    intersection_points.append((lat, lon))
-                                    intersected_waterways.add(i)
-                                    intersected_waterways.add(j)
-                                    logger.debug(f"Found intersection between waterway {waterways[i]['id']} and {waterways[j]['id']} at ({lat:.6f}, {lon:.6f})")
+                                    if isinstance(point, Point):
+                                        lat, lon = point.y, point.x
+                                        intersection_points.append((lat, lon))
+                                        intersected_waterways.add(i)
+                                        intersected_waterways.add(j)
+                                        logger.debug(f"Found intersection between waterway {waterways[i]['id']} and {waterways[j]['id']} at ({lat:.6f}, {lon:.6f})")
                                     
                             # Note: LineString intersections (overlapping segments) are more complex and less common
                             # For now, we focus on point intersections which solve the reported issue
@@ -1822,7 +1823,7 @@ class ModernWaterwayGraphBuilder:
                     
                     intersection = line_i.intersection(line_j)
                     
-                    if not intersection.is_empty and intersection.geom_type == 'Point':
+                    if not intersection.is_empty and intersection.geom_type == 'Point' and isinstance(intersection, Point):
                         lat, lon = intersection.y, intersection.x
                         intersection_points.append((lat, lon))
                         logger.debug(f"Found intersection between waterway {waterways[i]['id']} and {waterways[j]['id']} at ({lat:.6f}, {lon:.6f})")
