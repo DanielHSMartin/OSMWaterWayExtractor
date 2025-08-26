@@ -1827,8 +1827,15 @@ class ModernWaterwayGraphBuilder:
             # Find all intersection points
             intersection_points = []
             intersected_waterways = set()
+            total_waterways = len(waterway_lines)
+            progress_interval = max(1, total_waterways // 20)  # Report progress every 5%
             
-            for i, line_i in waterway_lines.items():
+            for idx, (i, line_i) in enumerate(waterway_lines.items()):
+                # Report progress periodically
+                if idx % progress_interval == 0 and idx > 0:
+                    progress_pct = (idx * 100) // total_waterways
+                    logger.info(f"Intersection detection progress: {progress_pct}% ({idx}/{total_waterways} waterways processed, {len(intersection_points)} intersections found so far)")
+                
                 # Query spatial index for potential intersections
                 potential_intersections = list(spatial_index.intersection(line_i.bounds))
                 
@@ -1891,9 +1898,26 @@ class ModernWaterwayGraphBuilder:
         logger.info("Using basic O(n²) intersection detection...")
         
         intersection_points = []
+        total_comparisons = len(waterways) * (len(waterways) - 1) // 2
+        comparisons_done = 0
+        progress_interval = max(1, total_comparisons // 20)  # Report progress every 5%
+        start_time = time.time()
+        
+        logger.info(f"Processing {total_comparisons} waterway pair comparisons for intersection detection")
         
         for i in range(len(waterways)):
             for j in range(i + 1, len(waterways)):
+                comparisons_done += 1
+                
+                # Report progress periodically
+                if comparisons_done % progress_interval == 0:
+                    elapsed = time.time() - start_time
+                    progress_pct = (comparisons_done * 100) // total_comparisons
+                    rate = comparisons_done / elapsed if elapsed > 0 else 0
+                    eta = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
+                    logger.info(f"Basic intersection detection progress: {progress_pct}% ({comparisons_done}/{total_comparisons} pairs checked, "
+                              f"{len(intersection_points)} intersections found, {elapsed:.1f}s elapsed, ETA: {eta:.1f}s)")
+                
                 try:
                     coords_i = waterways[i]['coordinates']
                     coords_j = waterways[j]['coordinates']
@@ -1915,7 +1939,8 @@ class ModernWaterwayGraphBuilder:
                     logger.debug(f"Error checking intersection between waterways {waterways[i]['id']} and {waterways[j]['id']}: {e}")
                     continue
                     
-        logger.info(f"Found {len(intersection_points)} intersection points")
+        total_time = time.time() - start_time
+        logger.info(f"Completed basic intersection detection: found {len(intersection_points)} intersection points in {total_time:.1f}s")
         
         if not intersection_points:
             return waterways
@@ -1945,8 +1970,21 @@ class ModernWaterwayGraphBuilder:
         """Sequential implementation of waterway splitting."""
         modified_waterways = []
         split_count = 0
+        progress_interval = max(1, len(waterways) // 20)  # Report progress every 5%
+        start_time = time.time()
         
-        for waterway in waterways:
+        logger.info(f"Starting sequential processing of {len(waterways)} waterways with {len(intersection_points)} intersection points")
+        
+        for idx, waterway in enumerate(waterways):
+            # Report progress periodically
+            if idx % progress_interval == 0 and idx > 0:
+                elapsed = time.time() - start_time
+                progress_pct = (idx * 100) // len(waterways)
+                rate = idx / elapsed if elapsed > 0 else 0
+                eta = (len(waterways) - idx) / rate if rate > 0 else 0
+                logger.info(f"Sequential processing progress: {progress_pct}% ({idx}/{len(waterways)} waterways processed, "
+                          f"{split_count} intersections inserted, {elapsed:.1f}s elapsed, ETA: {eta:.1f}s)")
+            
             coords = waterway['coordinates']
             if len(coords) < 2:
                 modified_waterways.append(waterway)
@@ -2018,7 +2056,8 @@ class ModernWaterwayGraphBuilder:
                 'tags': waterway['tags']
             })
             
-        logger.info(f"Inserted {split_count} intersection points into waterway coordinate sequences")
+        total_time = time.time() - start_time
+        logger.info(f"Completed sequential processing: inserted {split_count} intersection points into {len(modified_waterways)} waterway coordinate sequences in {total_time:.1f}s")
         return modified_waterways
     
     def _split_waterways_multiprocessing(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
@@ -2034,12 +2073,26 @@ class ModernWaterwayGraphBuilder:
             chunk_size = max(1, len(waterways) // self.config.parallel_workers)
             waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
             
-            logger.info(f"Processing {len(waterway_chunks)} chunks with {self.config.parallel_workers} workers")
+            logger.info(f"Processing {len(waterway_chunks)} chunks of ~{chunk_size} waterways each with {self.config.parallel_workers} workers")
+            logger.info(f"Estimated processing time: ~{len(waterways) * len(intersection_points) // 50000 + 10} seconds for {len(waterways)} waterways × {len(intersection_points)} intersection points")
             
-            # Process chunks in parallel
+            # Process chunks in parallel with progress monitoring
+            start_time = time.time()
             with mp.Pool(processes=self.config.parallel_workers) as pool:
                 worker_func = partial(_split_waterways_chunk, intersection_points=intersection_points, config_dict=config_dict)
-                chunk_results = pool.map(worker_func, waterway_chunks)
+                
+                # Use imap for progress tracking instead of map
+                results_iter = pool.imap(worker_func, waterway_chunks)
+                chunk_results = []
+                
+                for idx, result in enumerate(results_iter):
+                    chunk_results.append(result)
+                    elapsed = time.time() - start_time
+                    progress_pct = ((idx + 1) * 100) // len(waterway_chunks)
+                    waterways_processed = sum(len(chunk) for chunk in waterway_chunks[:idx + 1])
+                    
+                    logger.info(f"Multiprocessing progress: {progress_pct}% ({idx + 1}/{len(waterway_chunks)} chunks completed, "
+                              f"{waterways_processed}/{len(waterways)} waterways processed, {elapsed:.1f}s elapsed)")
             
             # Combine results from all chunks
             modified_waterways = []
@@ -2049,7 +2102,8 @@ class ModernWaterwayGraphBuilder:
                 modified_waterways.extend(waterways_result)
                 total_split_count += split_count
             
-            logger.info(f"Inserted {total_split_count} intersection points into waterway coordinate sequences using multiprocessing")
+            total_time = time.time() - start_time
+            logger.info(f"Completed waterway splitting: inserted {total_split_count} intersection points into {len(modified_waterways)} waterway coordinate sequences in {total_time:.1f}s using multiprocessing")
             return modified_waterways
             
         except Exception as e:
@@ -2078,6 +2132,8 @@ class ModernWaterwayGraphBuilder:
         chunk_size = max(1, len(waterways) // self.config.parallel_workers)
         waterway_chunks = [waterways[i:i + chunk_size] for i in range(0, len(waterways), chunk_size)]
         
+        logger.info(f"Processing {len(waterway_chunks)} chunks of ~{chunk_size} waterways each for endpoint extraction")
+        
         # Prepare work items for multiprocessing
         work_items = [(chunk,) for chunk in waterway_chunks]
         
@@ -2085,9 +2141,21 @@ class ModernWaterwayGraphBuilder:
         all_coordinates_counts = []
         all_endpoints = []
         
+        start_time = time.time()
         with multiprocessing.Pool(processes=self.config.parallel_workers) as pool:
             try:
-                chunk_results = pool.map(_extract_endpoints_chunk, work_items)
+                # Use imap for progress tracking
+                results_iter = pool.imap(_extract_endpoints_chunk, work_items)
+                chunk_results = []
+                
+                for idx, result in enumerate(results_iter):
+                    chunk_results.append(result)
+                    elapsed = time.time() - start_time
+                    progress_pct = ((idx + 1) * 100) // len(waterway_chunks)
+                    waterways_processed = sum(len(chunk) for chunk in waterway_chunks[:idx + 1])
+                    
+                    logger.info(f"Endpoint extraction progress: {progress_pct}% ({idx + 1}/{len(waterway_chunks)} chunks completed, "
+                              f"{waterways_processed}/{len(waterways)} waterways processed, {elapsed:.1f}s elapsed)")
                 
                 # Collect results
                 for chunk_endpoint_count, chunk_all_coords_count, chunk_endpoints in chunk_results:
@@ -2120,7 +2188,8 @@ class ModernWaterwayGraphBuilder:
         all_junctions = endpoint_junctions + interior_junctions
         endpoints = list(set(all_endpoints))
         
-        logger.info(f"Found {len(endpoints)} unique endpoints, {len(endpoint_junctions)} endpoint junctions, {len(interior_junctions)} interior junctions")
+        total_time = time.time() - start_time
+        logger.info(f"Completed endpoint extraction in {total_time:.1f}s: found {len(endpoints)} unique endpoints, {len(endpoint_junctions)} endpoint junctions, {len(interior_junctions)} interior junctions")
         return endpoints, all_junctions
     
     def _extract_endpoints_sequential(self, waterways: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
