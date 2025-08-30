@@ -2036,7 +2036,7 @@ class ModernWaterwayGraphBuilder:
             self.qa_metrics['intersection_points_inserted'] = split_count
             return result_waterways
     
-    def _split_waterways_sequential(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
+    def _split_waterways_sequential(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> Tuple[List[Dict], int]:
         """Sequential implementation of waterway splitting with spatial indexing optimization."""
         from shapely.geometry import LineString, Point
         from rtree import index
@@ -2151,7 +2151,7 @@ class ModernWaterwayGraphBuilder:
         logger.info(f"Completed sequential processing: inserted {split_count} intersection points into {len(modified_waterways)} waterway coordinate sequences in {total_time:.1f}s")
         return modified_waterways, split_count
     
-    def _split_waterways_multiprocessing(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> List[Dict]:
+    def _split_waterways_multiprocessing(self, waterways: List[Dict], intersection_points: List[Tuple[float, float]]) -> Tuple[List[Dict], int]:
         """Split waterways using multiprocessing for improved performance."""
         import multiprocessing as mp
         from functools import partial
