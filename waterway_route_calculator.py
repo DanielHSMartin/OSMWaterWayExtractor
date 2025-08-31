@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.1-disconnected-final-edge-fix"
+SCRIPT_VERSION = "2.1.2-fix-duplicate-final-connection"
 
 import json
 import gzip
@@ -503,7 +503,7 @@ class WaterwayRouteCalculator:
                 print(f"Finding waterway path from edge {start_edge.id} to edge {end_edge.id}")
                 
                 # Enhanced routing for disconnected networks
-                route_segments_found = self._find_disconnected_route(
+                route_segments_found, final_handled = self._find_disconnected_route(
                     start_edge, start_point_on_edge, 
                     end_edge, end_point_on_edge, 
                     end_point
@@ -514,6 +514,10 @@ class WaterwayRouteCalculator:
                     segment_geometry.extend(route_segment['geometry'])
                     segment_distance += route_segment['distance']
                     print(f"  Added route segment: {route_segment['type']}, {route_segment['distance']:.2f}m, {len(route_segment['geometry'])} points")
+                
+                # If disconnected routing handled the final connection, don't add another one
+                if final_handled:
+                    final_connection_needed = False
             
             # Add connection from waterway network to final waypoint
             if final_connection_needed and end_distance > 0.1:  # Only add if not already on the edge
@@ -554,9 +558,10 @@ class WaterwayRouteCalculator:
     
     def _find_disconnected_route(self, start_edge: Edge, start_point_on_edge: Point, 
                                 end_edge: Edge, end_point_on_edge: Point, 
-                                end_waypoint: Point) -> List[Dict]:
+                                end_waypoint: Point) -> Tuple[List[Dict], bool]:
         """Find route through potentially disconnected waterway network."""
         route_segments = []
+        final_handled = False  # Track whether we handled the final connection
         
         # First, try direct connection between edges
         best_direct_path = []
@@ -586,7 +591,7 @@ class WaterwayRouteCalculator:
                     'nodes': best_direct_path
                 })
             
-            return route_segments
+            return route_segments, final_handled
         
         # No direct path found - analyze disconnected networks
         print(f"No direct path found - analyzing disconnected network routing")
@@ -721,6 +726,7 @@ class WaterwayRouteCalculator:
                                     'nodes': []
                                 })
                                 print(f"  Added final edge geometry: {len(final_edge_geometry)-1} points, {final_edge_distance:.2f}m")
+                                final_handled = True  # We handled the final connection with edge geometry
                             else:
                                 print(f"  Final edge geometry too short, adding connection point")
                                 # Add final connection to end edge point
@@ -777,7 +783,7 @@ class WaterwayRouteCalculator:
                 'nodes': []
             })
         
-        return route_segments
+        return route_segments, final_handled
     
     def create_geojson_output(self, route_result: Dict, waypoints: List[Point]) -> Dict:
         """Create GeoJSON output for the calculated route."""
