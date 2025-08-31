@@ -10,3 +10,4 @@ venv/
 brazil-latest.osm.pbf
 norte-latest.osm.pbf
 centro-oeste-latest.osm.pbf
+.DS_Store
