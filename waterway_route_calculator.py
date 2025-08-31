@@ -16,6 +16,9 @@ Features:
 - Outputs GeoJSON format with route geometry
 """
 
+# Version identifier for tracking script updates
+SCRIPT_VERSION = "2.1.0-final-edge-fix"
+
 import json
 import gzip
 import sys
@@ -479,6 +482,8 @@ class WaterwayRouteCalculator:
             segment_geometry.append((start_point_on_edge.lat, start_point_on_edge.lon))
             
             # Find path through waterway network
+            final_connection_needed = True
+            
             if start_edge.id == end_edge.id:
                 print(f"Start and end points are on the same edge {start_edge.id}")
                 # Points are on the same edge - follow the waterway geometry
@@ -488,10 +493,12 @@ class WaterwayRouteCalculator:
                 if len(edge_geometry) > 1:
                     segment_geometry.extend(edge_geometry[1:])
                     segment_distance += edge_distance
+                    final_connection_needed = False  # No final connection needed - already handled
                 else:
                     # Fallback to direct connection if no geometry available
                     segment_geometry.append((end_point_on_edge.lat, end_point_on_edge.lon))
                     segment_distance += start_point_on_edge.distance_to(end_point_on_edge)
+                    final_connection_needed = False  # No final connection needed - already handled
             else:
                 print(f"Finding waterway path from edge {start_edge.id} to edge {end_edge.id}")
                 
@@ -508,11 +515,36 @@ class WaterwayRouteCalculator:
                     segment_distance += route_segment['distance']
                     print(f"  Added route segment: {route_segment['type']}, {route_segment['distance']:.2f}m, {len(route_segment['geometry'])} points")
             
-            # Add straight line from closest point on end edge to waypoint
-            if end_distance > 0.1:  # Only add if not already on the edge
-                print(f"Adding straight line from waterway network to waypoint ({end_distance:.2f}m)")
-                segment_geometry.append((end_point.lat, end_point.lon))
-                segment_distance += end_distance
+            # Add connection from waterway network to final waypoint
+            if final_connection_needed and end_distance > 0.1:  # Only add if not already on the edge
+                # Check if we should follow edge geometry for the final connection
+                if len(segment_geometry) > 0:
+                    last_route_point = Point(segment_geometry[-1][0], segment_geometry[-1][1])
+                    # Check if both the last route point and destination are on the same edge
+                    last_edge, last_point_on_edge, last_edge_distance = self.graph.find_closest_edge(last_route_point)
+                    
+                    if (last_edge.id == end_edge.id and 
+                        last_edge_distance < 10.0 and end_distance < 10.0):  # Both points are close to the same edge
+                        print(f"Final connection: following edge geometry on edge {end_edge.id}")
+                        final_geometry, final_distance = end_edge.get_geometry_between_points(last_point_on_edge, end_point_on_edge)
+                        if len(final_geometry) > 1:
+                            # Add the edge geometry (skip first point as it's already added)
+                            segment_geometry.extend(final_geometry[1:])
+                            segment_distance += final_distance
+                            print(f"  Following edge geometry: {len(final_geometry)} points, {final_distance:.2f}m")
+                        else:
+                            # Fallback to straight line if no geometry available
+                            segment_geometry.append((end_point.lat, end_point.lon))
+                            segment_distance += end_distance
+                            print(f"  Using straight line fallback: {end_distance:.2f}m")
+                    else:
+                        print(f"Adding straight line from waterway network to waypoint ({end_distance:.2f}m)")
+                        segment_geometry.append((end_point.lat, end_point.lon))
+                        segment_distance += end_distance
+                else:
+                    print(f"Adding straight line from waterway network to waypoint ({end_distance:.2f}m)")
+                    segment_geometry.append((end_point.lat, end_point.lon))
+                    segment_distance += end_distance
             
             print(f"Segment {i+1} completed: {segment_distance:.2f}m, {len(segment_geometry)} coordinates")
             
@@ -843,6 +875,10 @@ Use -- before coordinates if they start with minus signs to avoid parsing as opt
         sys.exit(1)
     
     try:
+        # Print version information
+        print(f"Waterway Route Calculator v{SCRIPT_VERSION}")
+        print()
+        
         # Parse waypoints
         waypoints = parse_coordinate_pairs(args.waypoints)
         
