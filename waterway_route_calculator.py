@@ -49,7 +49,7 @@ class Edge:
     def get_closest_point_on_edge(self, point: Point) -> Tuple[Point, float]:
         """Find the closest point on this edge to the given point."""
         min_distance = float('inf')
-        closest_point = None
+        closest_point = Point(0.0, 0.0)
         
         # Check each segment of the edge
         for i in range(len(self.coordinates) - 1):
@@ -156,9 +156,12 @@ class WaterwayGraph:
     
     def find_closest_edge(self, point: Point) -> Tuple[Edge, Point, float]:
         """Find the closest edge to the given point."""
+        if not self.edges:
+            raise ValueError("No edges available in the graph")
+        
         min_distance = float('inf')
-        closest_edge = None
-        closest_point_on_edge = None
+        closest_edge = self.edges[0]  # Initialize with first edge
+        closest_point_on_edge = Point(0.0, 0.0)  # Will be overwritten
         
         print(f"  Searching through {len(self.edges)} edges for closest to ({point.lat:.6f}, {point.lon:.6f})")
         
