@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.2-fix-duplicate-final-connection"
+SCRIPT_VERSION = "2.1.3-fix-reverse-edge-geometry"
 
 import json
 import gzip
@@ -716,6 +716,22 @@ class WaterwayRouteCalculator:
                             print(f"  Adding edge geometry from end of waterway to destination")
                             final_edge_geometry, final_edge_distance = end_edge.get_geometry_between_points(end_waterway_point_on_edge, end_point_on_edge)
                             print(f"  Final edge geometry: {len(final_edge_geometry)} points, {final_edge_distance:.2f}m")
+                            
+                            # Check if geometry is in reverse direction (first point should be near end_waterway_point)
+                            if len(final_edge_geometry) > 1:
+                                first_point = Point(final_edge_geometry[0][0], final_edge_geometry[0][1])
+                                last_point = Point(final_edge_geometry[-1][0], final_edge_geometry[-1][1])
+                                
+                                dist_to_first = end_waterway_point_on_edge.distance_to(first_point)
+                                dist_to_last = end_waterway_point_on_edge.distance_to(last_point)
+                                
+                                print(f"  Distance from end_waterway to first point: {dist_to_first:.2f}m")
+                                print(f"  Distance from end_waterway to last point: {dist_to_last:.2f}m")
+                                
+                                # If geometry is in reverse direction, reverse it
+                                if dist_to_last < dist_to_first:
+                                    print(f"  Reversing geometry to correct direction")
+                                    final_edge_geometry = list(reversed(final_edge_geometry))
                             
                             if len(final_edge_geometry) > 1 and final_edge_distance > 1.0:
                                 # Add the edge geometry (skip first point to avoid duplication)
