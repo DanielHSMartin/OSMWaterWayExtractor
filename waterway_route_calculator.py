@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.0-final-edge-fix"
+SCRIPT_VERSION = "2.1.1-disconnected-final-edge-fix"
 
 import json
 import gzip
@@ -517,34 +517,9 @@ class WaterwayRouteCalculator:
             
             # Add connection from waterway network to final waypoint
             if final_connection_needed and end_distance > 0.1:  # Only add if not already on the edge
-                # Check if we should follow edge geometry for the final connection
-                if len(segment_geometry) > 0:
-                    last_route_point = Point(segment_geometry[-1][0], segment_geometry[-1][1])
-                    # Check if both the last route point and destination are on the same edge
-                    last_edge, last_point_on_edge, last_edge_distance = self.graph.find_closest_edge(last_route_point)
-                    
-                    if (last_edge.id == end_edge.id and 
-                        last_edge_distance < 10.0 and end_distance < 10.0):  # Both points are close to the same edge
-                        print(f"Final connection: following edge geometry on edge {end_edge.id}")
-                        final_geometry, final_distance = end_edge.get_geometry_between_points(last_point_on_edge, end_point_on_edge)
-                        if len(final_geometry) > 1:
-                            # Add the edge geometry (skip first point as it's already added)
-                            segment_geometry.extend(final_geometry[1:])
-                            segment_distance += final_distance
-                            print(f"  Following edge geometry: {len(final_geometry)} points, {final_distance:.2f}m")
-                        else:
-                            # Fallback to straight line if no geometry available
-                            segment_geometry.append((end_point.lat, end_point.lon))
-                            segment_distance += end_distance
-                            print(f"  Using straight line fallback: {end_distance:.2f}m")
-                    else:
-                        print(f"Adding straight line from waterway network to waypoint ({end_distance:.2f}m)")
-                        segment_geometry.append((end_point.lat, end_point.lon))
-                        segment_distance += end_distance
-                else:
-                    print(f"Adding straight line from waterway network to waypoint ({end_distance:.2f}m)")
-                    segment_geometry.append((end_point.lat, end_point.lon))
-                    segment_distance += end_distance
+                print(f"Adding straight line from waterway network to waypoint ({end_distance:.2f}m)")
+                segment_geometry.append((end_point.lat, end_point.lon))
+                segment_distance += end_distance
             
             print(f"Segment {i+1} completed: {segment_distance:.2f}m, {len(segment_geometry)} coordinates")
             
@@ -610,13 +585,6 @@ class WaterwayRouteCalculator:
                     'distance': best_direct_distance,
                     'nodes': best_direct_path
                 })
-            
-            route_segments.append({
-                'type': 'connection_to_end',
-                'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
-                'distance': 0.0,
-                'nodes': []
-            })
             
             return route_segments
         
@@ -729,10 +697,75 @@ class WaterwayRouteCalculator:
                         'nodes': best_route_config['end_route']
                     })
                     print(f"  Added end waterway segment: {len(best_route_config['end_route'])} nodes, {best_route_config['end_distance']:.2f}m")
+                    
+                    # Check if we need to add edge geometry from the end of waterway route to the destination
+                    if end_path_geometry:
+                        end_waterway_point = Point(end_path_geometry[-1][0], end_path_geometry[-1][1])
+                        end_waterway_edge, end_waterway_point_on_edge, end_waterway_distance = self.graph.find_closest_edge(end_waterway_point)
+                        
+                        print(f"  End waterway point: ({end_waterway_point.lat:.6f}, {end_waterway_point.lon:.6f})")
+                        print(f"  Destination point: ({end_point_on_edge.lat:.6f}, {end_point_on_edge.lon:.6f})")
+                        
+                        if (end_waterway_edge.id == end_edge.id and end_waterway_distance < 10.0):
+                            # Both the end of waterway and destination are on the same edge
+                            print(f"  Adding edge geometry from end of waterway to destination")
+                            final_edge_geometry, final_edge_distance = end_edge.get_geometry_between_points(end_waterway_point_on_edge, end_point_on_edge)
+                            print(f"  Final edge geometry: {len(final_edge_geometry)} points, {final_edge_distance:.2f}m")
+                            
+                            if len(final_edge_geometry) > 1 and final_edge_distance > 1.0:
+                                # Add the edge geometry (skip first point to avoid duplication)
+                                route_segments.append({
+                                    'type': 'final_edge_geometry',
+                                    'geometry': final_edge_geometry[1:],  # Skip first point
+                                    'distance': final_edge_distance,
+                                    'nodes': []
+                                })
+                                print(f"  Added final edge geometry: {len(final_edge_geometry)-1} points, {final_edge_distance:.2f}m")
+                            else:
+                                print(f"  Final edge geometry too short, adding connection point")
+                                # Add final connection to end edge point
+                                route_segments.append({
+                                    'type': 'connection_to_end',
+                                    'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
+                                    'distance': 0.0,
+                                    'nodes': []
+                                })
+                        else:
+                            print(f"  Different edges or too far, adding connection point")
+                            # Add final connection to end edge point
+                            route_segments.append({
+                                'type': 'connection_to_end',
+                                'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
+                                'distance': 0.0,
+                                'nodes': []
+                            })
+                    else:
+                        print(f"  No end path geometry, adding connection point")
+                        # Add final connection to end edge point
+                        route_segments.append({
+                            'type': 'connection_to_end',
+                            'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
+                            'distance': 0.0,
+                            'nodes': []
+                        })
                 else:
                     print(f"  End route geometry was empty, nodes: {best_route_config['end_route']}")
+                    # Add final connection to end edge point
+                    route_segments.append({
+                        'type': 'connection_to_end',
+                        'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
+                        'distance': 0.0,
+                        'nodes': []
+                    })
             else:
                 print(f"  Skipped end waterway segment: distance={best_route_config['end_distance']:.2f}m, nodes={len(best_route_config['end_route'])}")
+                # Add final connection to end edge point
+                route_segments.append({
+                    'type': 'connection_to_end',
+                    'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
+                    'distance': 0.0,
+                    'nodes': []
+                })
         else:
             # Fallback to straight line if no meaningful waterway routing possible
             print(f"No meaningful waterway routing possible - using straight line")
@@ -743,14 +776,6 @@ class WaterwayRouteCalculator:
                 'distance': bridge_distance,
                 'nodes': []
             })
-        
-        # Add final connection to end edge point
-        route_segments.append({
-            'type': 'connection_to_end',
-            'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
-            'distance': 0.0,
-            'nodes': []
-        })
         
         return route_segments
     
