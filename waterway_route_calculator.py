@@ -69,6 +69,89 @@ class Edge:
                 closest_point = Point(segment_closest[0], segment_closest[1])
         
         return closest_point, min_distance
+    
+    def get_closest_point_with_position(self, point: Point) -> Tuple[Point, float, int, float]:
+        """Find the closest point on this edge and return position information."""
+        min_distance = float('inf')
+        closest_point = Point(0.0, 0.0)
+        best_segment_index = 0
+        best_segment_ratio = 0.0
+        
+        # Check each segment of the edge
+        for i in range(len(self.coordinates) - 1):
+            start_lat, start_lon = self.coordinates[i]
+            end_lat, end_lon = self.coordinates[i + 1]
+            
+            # Find closest point on this segment
+            segment_closest = closest_point_on_segment(
+                point.lat, point.lon,
+                start_lat, start_lon,
+                end_lat, end_lon
+            )
+            
+            distance = point.distance_to(Point(segment_closest[0], segment_closest[1]))
+            if distance < min_distance:
+                min_distance = distance
+                closest_point = Point(segment_closest[0], segment_closest[1])
+                best_segment_index = i
+                
+                # Calculate ratio along this segment
+                segment_start = Point(start_lat, start_lon)
+                segment_end = Point(end_lat, end_lon)
+                segment_total_dist = segment_start.distance_to(segment_end)
+                if segment_total_dist > 0:
+                    dist_from_start = segment_start.distance_to(closest_point)
+                    best_segment_ratio = dist_from_start / segment_total_dist
+                else:
+                    best_segment_ratio = 0.0
+        
+        return closest_point, min_distance, best_segment_index, best_segment_ratio
+    
+    def get_geometry_between_points(self, start_point: Point, end_point: Point) -> Tuple[List[Tuple[float, float]], float]:
+        """Extract geometry and distance between two points on this edge."""
+        # Get position information for both points
+        start_closest, _, start_seg_idx, start_ratio = self.get_closest_point_with_position(start_point)
+        end_closest, _, end_seg_idx, end_ratio = self.get_closest_point_with_position(end_point)
+        
+        # Ensure start comes before end on the edge
+        if start_seg_idx > end_seg_idx or (start_seg_idx == end_seg_idx and start_ratio > end_ratio):
+            # Swap if needed
+            start_closest, end_closest = end_closest, start_closest
+            start_seg_idx, end_seg_idx = end_seg_idx, start_seg_idx
+            start_ratio, end_ratio = end_ratio, start_ratio
+        
+        geometry = []
+        total_distance = 0.0
+        
+        # Add the starting point
+        geometry.append((start_closest.lat, start_closest.lon))
+        
+        # If both points are on the same segment
+        if start_seg_idx == end_seg_idx:
+            geometry.append((end_closest.lat, end_closest.lon))
+            total_distance = start_closest.distance_to(end_closest)
+        else:
+            # Add coordinates from start segment to end of that segment
+            if start_seg_idx + 1 < len(self.coordinates):
+                next_coord = self.coordinates[start_seg_idx + 1]
+                geometry.append(next_coord)
+                total_distance += start_closest.distance_to(Point(next_coord[0], next_coord[1]))
+            
+            # Add all intermediate coordinates
+            for i in range(start_seg_idx + 1, end_seg_idx):
+                if i + 1 < len(self.coordinates):
+                    curr_coord = self.coordinates[i]
+                    next_coord = self.coordinates[i + 1]
+                    geometry.append(next_coord)
+                    total_distance += haversine_distance(curr_coord[0], curr_coord[1], next_coord[0], next_coord[1])
+            
+            # Add the ending point
+            if len(geometry) > 1:
+                prev_point = Point(geometry[-1][0], geometry[-1][1])
+                total_distance += prev_point.distance_to(end_closest)
+            geometry.append((end_closest.lat, end_closest.lon))
+        
+        return geometry, total_distance
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -398,9 +481,17 @@ class WaterwayRouteCalculator:
             # Find path through waterway network
             if start_edge.id == end_edge.id:
                 print(f"Start and end points are on the same edge {start_edge.id}")
-                # Points are on the same edge - add direct connection
-                segment_geometry.append((end_point_on_edge.lat, end_point_on_edge.lon))
-                segment_distance += start_point_on_edge.distance_to(end_point_on_edge)
+                # Points are on the same edge - follow the waterway geometry
+                edge_geometry, edge_distance = start_edge.get_geometry_between_points(start_point_on_edge, end_point_on_edge)
+                print(f"  Following edge geometry: {len(edge_geometry)} points, {edge_distance:.2f}m")
+                # Add the edge geometry (skip first point as it's already added)
+                if len(edge_geometry) > 1:
+                    segment_geometry.extend(edge_geometry[1:])
+                    segment_distance += edge_distance
+                else:
+                    # Fallback to direct connection if no geometry available
+                    segment_geometry.append((end_point_on_edge.lat, end_point_on_edge.lon))
+                    segment_distance += start_point_on_edge.distance_to(end_point_on_edge)
             else:
                 print(f"Finding waterway path from edge {start_edge.id} to edge {end_edge.id}")
                 
