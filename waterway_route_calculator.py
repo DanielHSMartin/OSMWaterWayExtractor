@@ -254,28 +254,27 @@ class WaterwayGraph:
         
         return distances, previous
     
-    def find_optimal_reachable_towards_target(self, start_node: int, target_point: Point) -> Tuple[int, float, float]:
-        """Find the optimal reachable node from start_node towards target_point that minimizes total distance."""
+    def find_farthest_reachable_towards_target(self, start_node: int, target_point: Point) -> Tuple[int, float, float]:
+        """Find the farthest reachable node from start_node in the direction of target_point."""
         distances, previous = self.dijkstra_to_all_reachable(start_node)
         
         best_node = start_node
         best_distance_along_waterway = 0.0
         best_distance_to_target = self.nodes[start_node].distance_to(target_point)
-        best_total_distance = best_distance_along_waterway + best_distance_to_target
         
-        # Find the reachable node that minimizes total distance (waterway + straight line to target)
+        # Find the reachable node that gets closest to the target (minimizes straight-line distance to target)
+        # while using the waterway network as much as possible
         for node_id, waterway_distance in distances.items():
-            if waterway_distance != float('inf'):  # Node is reachable
+            if waterway_distance != float('inf') and waterway_distance > 0:  # Node is reachable and not the start
                 node_point = self.nodes[node_id]
                 distance_to_target = node_point.distance_to(target_point)
-                total_distance = waterway_distance + distance_to_target
                 
-                # Prefer nodes that minimize total distance
-                if total_distance < best_total_distance:
+                # Prefer nodes that get closer to the target, prioritizing longer waterway distances for ties
+                if (distance_to_target < best_distance_to_target or 
+                    (distance_to_target == best_distance_to_target and waterway_distance > best_distance_along_waterway)):
                     best_node = node_id
                     best_distance_along_waterway = waterway_distance
                     best_distance_to_target = distance_to_target
-                    best_total_distance = total_distance
         
         return best_node, best_distance_along_waterway, best_distance_to_target
     
@@ -493,169 +492,152 @@ class WaterwayRouteCalculator:
             
             return route_segments
         
-        # No direct path found - use enhanced routing for disconnected networks
+        # No direct path found - route through waterway network as far as possible
         print(f"No direct path found - analyzing disconnected network routing")
         
-        # Find the optimal reachable point from start edge towards destination
-        best_start_node = None
-        best_start_distance_along_waterway = 0.0
-        best_start_distance_to_target = float('inf')
+        # Find the best path from start towards destination through waterway network
+        best_start_route = None
+        best_start_endpoint = None
+        best_start_distance = 0.0
         
         for start_node in start_nodes:
-            optimal_node, waterway_dist, target_dist = self.graph.find_optimal_reachable_towards_target(
-                start_node, end_waypoint
-            )
-            total_dist = waterway_dist + target_dist
-            print(f"  From start node {start_node}: optimal reachable node {optimal_node}, waterway distance {waterway_dist:.2f}m, remaining distance to target {target_dist:.2f}m, total {total_dist:.2f}m")
+            # Get all reachable nodes from this start node
+            distances, previous = self.graph.dijkstra_to_all_reachable(start_node)
             
-            if target_dist < best_start_distance_to_target:
-                best_start_node = start_node
-                best_start_distance_along_waterway = waterway_dist
-                best_start_distance_to_target = target_dist
-        
-        # Find closest reachable point from end edge towards start
-        best_end_node = None
-        best_end_distance_along_waterway = 0.0
-        best_end_distance_from_intermediate = float('inf')
-        
-        if best_start_node is not None:
-            # Get distances from start's connected component
-            start_distances, start_previous = self.graph.dijkstra_to_all_reachable(best_start_node)
+            # Find the node that gets closest to the destination
+            best_endpoint_for_this_start = start_node
+            best_distance_to_destination = self.nodes[start_node].distance_to(end_waypoint)
+            best_waterway_distance = 0.0
             
-            # Find the node in start's component that gets closest to end edge
-            intermediate_point = None
-            intermediate_node = best_start_node
-            best_intermediate_total_distance = float('inf')
-            
-            for node_id, waterway_distance in start_distances.items():
+            for node_id, waterway_distance in distances.items():
                 if waterway_distance != float('inf'):
-                    node_point = self.graph.nodes[node_id]
-                    distance_to_end = min(
-                        node_point.distance_to(Point(end_edge.coordinates[0][0], end_edge.coordinates[0][1])),
-                        node_point.distance_to(Point(end_edge.coordinates[-1][0], end_edge.coordinates[-1][1]))
-                    )
+                    node_point = self.nodes[node_id]
+                    distance_to_destination = node_point.distance_to(end_waypoint)
                     
-                    total_distance = waterway_distance + distance_to_end
-                    if total_distance < best_intermediate_total_distance:
-                        intermediate_node = node_id
-                        intermediate_point = node_point
-                        best_intermediate_total_distance = total_distance
-                        best_start_distance_to_target = distance_to_end
-                        best_start_distance_along_waterway = waterway_distance
+                    # Choose the node that gets closest to the destination
+                    if (distance_to_destination < best_distance_to_destination or
+                        (distance_to_destination == best_distance_to_destination and waterway_distance > best_waterway_distance)):
+                        best_endpoint_for_this_start = node_id
+                        best_distance_to_destination = distance_to_destination
+                        best_waterway_distance = waterway_distance
             
-            print(f"Best intermediate point in start component: node {intermediate_node}, waterway distance {best_start_distance_along_waterway:.2f}m")
+            print(f"  From start node {start_node}: best endpoint {best_endpoint_for_this_start}, waterway distance {best_waterway_distance:.2f}m, remaining distance {best_distance_to_destination:.2f}m")
             
-            if intermediate_point:
-                # Now find the closest point in end edge's connected component
-                for end_node in end_nodes:
-                    optimal_node, waterway_dist, intermediate_dist = self.graph.find_optimal_reachable_towards_target(
-                        end_node, intermediate_point
-                    )
-                    total_dist = waterway_dist + intermediate_dist
-                    print(f"  From end node {end_node}: optimal reachable node {optimal_node}, waterway distance {waterway_dist:.2f}m, distance from intermediate {intermediate_dist:.2f}m, total {total_dist:.2f}m")
-                    
-                    if intermediate_dist < best_end_distance_from_intermediate:
-                        best_end_node = end_node
-                        best_end_distance_along_waterway = waterway_dist
-                        best_end_distance_from_intermediate = intermediate_dist
+            # Choose the start node that produces the best overall result
+            if (best_start_route is None or 
+                best_distance_to_destination < best_start_endpoint[1] or
+                (best_distance_to_destination == best_start_endpoint[1] and best_waterway_distance > best_start_distance)):
+                
+                best_start_route = self.graph.reconstruct_path_to_node(best_endpoint_for_this_start, previous, start_node)
+                best_start_endpoint = (best_endpoint_for_this_start, best_distance_to_destination)
+                best_start_distance = best_waterway_distance
         
-        # Build route segments
-        if best_start_node is not None:
-            # Get path in start component - find the optimal endpoint that minimizes total distance
-            start_distances, start_previous = self.graph.dijkstra_to_all_reachable(best_start_node)
+        if best_start_route and best_start_distance > 0:
+            print(f"Best start route: {len(best_start_route)} nodes, {best_start_distance:.2f}m")
             
-            # Find best endpoint in start component by minimizing total distance
-            best_endpoint_in_start = best_start_node
-            best_total_distance = float('inf')
+            # Add waterway segment from start
+            start_path_geometry = self.graph.get_path_geometry(best_start_route)
+            if start_path_geometry:
+                route_segments.append({
+                    'type': 'waterway_path_start_component',
+                    'geometry': start_path_geometry,
+                    'distance': best_start_distance,
+                    'nodes': best_start_route
+                })
+                print(f"  Added start component waterway path: {len(best_start_route)} nodes, {best_start_distance:.2f}m")
             
-            for node_id, waterway_distance in start_distances.items():
-                if waterway_distance != float('inf'):
-                    node_point = self.graph.nodes[node_id]
-                    distance_to_target = node_point.distance_to(end_waypoint)
-                    
-                    # Choose node that minimizes total distance (waterway + straight line)
-                    total_distance = waterway_distance + distance_to_target
-                    if total_distance < best_total_distance:
-                        best_endpoint_in_start = node_id
-                        best_total_distance = total_distance
+            # Try to find a route in the destination network
+            start_endpoint_point = self.graph.nodes[best_start_endpoint[0]]
             
-            # Add waterway segment in start component
-            best_endpoint_distance = start_distances[best_endpoint_in_start]
-            if best_endpoint_distance > 0:
-                start_path = self.graph.reconstruct_path_to_node(best_endpoint_in_start, start_previous, best_start_node)
-                start_path_geometry = self.graph.get_path_geometry(start_path)
-                
-                if start_path_geometry:
-                    route_segments.append({
-                        'type': 'waterway_path_start_component',
-                        'geometry': start_path_geometry,
-                        'distance': best_endpoint_distance,
-                        'nodes': start_path
-                    })
-                    print(f"  Added start component waterway path: {len(start_path)} nodes, {best_endpoint_distance:.2f}m")
+            best_end_route = None
+            best_end_startpoint = None
+            best_end_distance = 0.0
+            best_bridge_distance = float('inf')
             
-            # Add straight line bridge to end component
-            if best_end_node is not None:
-                end_distances, end_previous = self.graph.dijkstra_to_all_reachable(best_end_node)
+            for end_node in end_nodes:
+                # Get all reachable nodes from this end node
+                distances, previous = self.graph.dijkstra_to_all_reachable(end_node)
                 
-                # Find best entry point in end component that minimizes bridge distance
-                best_entry_in_end = best_end_node
-                bridge_distance = float('inf')
+                # Find the node that gets closest to our start endpoint
+                best_bridge_point = end_node
+                best_bridge_dist = start_endpoint_point.distance_to(self.graph.nodes[end_node])
+                best_waterway_dist = 0.0
                 
-                start_endpoint = self.graph.nodes[best_endpoint_in_start]
-                
-                for node_id, distance in end_distances.items():
-                    if distance != float('inf'):
+                for node_id, waterway_distance in distances.items():
+                    if waterway_distance != float('inf'):
                         node_point = self.graph.nodes[node_id]
-                        bridge_dist = start_endpoint.distance_to(node_point)
+                        bridge_distance = start_endpoint_point.distance_to(node_point)
                         
-                        if bridge_dist < bridge_distance:
-                            best_entry_in_end = node_id
-                            bridge_distance = bridge_dist
+                        # Choose the node that minimizes bridge distance
+                        if (bridge_distance < best_bridge_dist or
+                            (bridge_distance == best_bridge_dist and waterway_distance > best_waterway_dist)):
+                            best_bridge_point = node_id
+                            best_bridge_dist = bridge_distance
+                            best_waterway_dist = waterway_distance
                 
-                # Add bridge segment
-                bridge_start = self.graph.nodes[best_endpoint_in_start]
-                bridge_end = self.graph.nodes[best_entry_in_end]
+                print(f"  From end node {end_node}: best bridge point {best_bridge_point}, bridge distance {best_bridge_dist:.2f}m, waterway distance {best_waterway_dist:.2f}m")
+                
+                # Choose the end route that minimizes bridge distance
+                if best_bridge_dist < best_bridge_distance:
+                    best_end_route = self.graph.reconstruct_path_to_node(end_node, previous, best_bridge_point)
+                    best_end_startpoint = best_bridge_point
+                    best_end_distance = best_waterway_dist
+                    best_bridge_distance = best_bridge_dist
+            
+            # Add bridge connection
+            if best_end_startpoint is not None:
+                bridge_start = self.graph.nodes[best_start_endpoint[0]]
+                bridge_end = self.graph.nodes[best_end_startpoint]
                 
                 route_segments.append({
                     'type': 'straight_line_bridge',
                     'geometry': [(bridge_start.lat, bridge_start.lon), (bridge_end.lat, bridge_end.lon)],
-                    'distance': bridge_distance,
-                    'nodes': [best_endpoint_in_start, best_entry_in_end]
+                    'distance': best_bridge_distance,
+                    'nodes': [best_start_endpoint[0], best_end_startpoint]
                 })
-                print(f"  Added straight line bridge: {bridge_distance:.2f}m")
+                print(f"  Added straight line bridge: {best_bridge_distance:.2f}m")
                 
-                # Add waterway segment in end component to reach end edge
-                if best_entry_in_end != best_end_node:
-                    end_path = self.graph.reconstruct_path_to_node(best_end_node, end_previous, best_entry_in_end)
-                    end_path_geometry = self.graph.get_path_geometry(end_path)
-                    
+                # Add end waterway segment if it exists
+                if best_end_route and best_end_distance > 0:
+                    end_path_geometry = self.graph.get_path_geometry(best_end_route)
                     if end_path_geometry:
-                        end_path_distance = end_distances[best_end_node] - end_distances[best_entry_in_end]
                         route_segments.append({
                             'type': 'waterway_path_end_component',
                             'geometry': end_path_geometry,
-                            'distance': end_path_distance,
-                            'nodes': end_path
+                            'distance': best_end_distance,
+                            'nodes': best_end_route
                         })
-                        print(f"  Added end component waterway path: {len(end_path)} nodes, {end_path_distance:.2f}m")
-            
-            # Add final connection to end edge point
-            route_segments.append({
-                'type': 'connection_to_end',
-                'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
-                'distance': 0.0,
-                'nodes': []
-            })
+                        print(f"  Added end component waterway path: {len(best_end_route)} nodes, {best_end_distance:.2f}m")
+            else:
+                # Direct bridge to end point
+                bridge_start = self.graph.nodes[best_start_endpoint[0]]
+                bridge_distance = bridge_start.distance_to(end_waypoint)
+                
+                route_segments.append({
+                    'type': 'straight_line_bridge',
+                    'geometry': [(bridge_start.lat, bridge_start.lon), (end_waypoint.lat, end_waypoint.lon)],
+                    'distance': bridge_distance,
+                    'nodes': [best_start_endpoint[0]]
+                })
+                print(f"  Added direct bridge to destination: {bridge_distance:.2f}m")
         else:
-            # Fallback to straight line if no routing possible
-            print(f"No waterway routing possible - using straight line")
+            # Fallback to straight line if no meaningful waterway routing possible
+            print(f"No meaningful waterway routing possible - using straight line")
+            bridge_distance = start_point_on_edge.distance_to(end_point_on_edge)
             route_segments.append({
                 'type': 'straight_line_fallback',
-                'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
-                'distance': start_point_on_edge.distance_to(end_point_on_edge),
+                'geometry': [(start_point_on_edge.lat, start_point_on_edge.lon), (end_point_on_edge.lat, end_point_on_edge.lon)],
+                'distance': bridge_distance,
                 'nodes': []
             })
+        
+        # Add final connection to end edge point
+        route_segments.append({
+            'type': 'connection_to_end',
+            'geometry': [(end_point_on_edge.lat, end_point_on_edge.lon)],
+            'distance': 0.0,
+            'nodes': []
+        })
         
         return route_segments
     
