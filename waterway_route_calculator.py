@@ -506,12 +506,12 @@ class WaterwayRouteCalculator:
             
             # Find the node that gets closest to the destination
             best_endpoint_for_this_start = start_node
-            best_distance_to_destination = self.nodes[start_node].distance_to(end_waypoint)
+            best_distance_to_destination = self.graph.nodes[start_node].distance_to(end_waypoint)
             best_waterway_distance = 0.0
             
             for node_id, waterway_distance in distances.items():
                 if waterway_distance != float('inf'):
-                    node_point = self.nodes[node_id]
+                    node_point = self.graph.nodes[node_id]
                     distance_to_destination = node_point.distance_to(end_waypoint)
                     
                     # Choose the node that gets closest to the destination
@@ -525,14 +525,14 @@ class WaterwayRouteCalculator:
             
             # Choose the start node that produces the best overall result
             if (best_start_route is None or 
-                best_distance_to_destination < best_start_endpoint[1] or
-                (best_distance_to_destination == best_start_endpoint[1] and best_waterway_distance > best_start_distance)):
+                (best_start_endpoint is not None and best_distance_to_destination < best_start_endpoint[1]) or
+                (best_start_endpoint is not None and best_distance_to_destination == best_start_endpoint[1] and best_waterway_distance > best_start_distance)):
                 
                 best_start_route = self.graph.reconstruct_path_to_node(best_endpoint_for_this_start, previous, start_node)
                 best_start_endpoint = (best_endpoint_for_this_start, best_distance_to_destination)
                 best_start_distance = best_waterway_distance
         
-        if best_start_route and best_start_distance > 0:
+        if best_start_route and best_start_distance > 0 and best_start_endpoint is not None:
             print(f"Best start route: {len(best_start_route)} nodes, {best_start_distance:.2f}m")
             
             # Add waterway segment from start
@@ -585,7 +585,7 @@ class WaterwayRouteCalculator:
                     best_bridge_distance = best_bridge_dist
             
             # Add bridge connection
-            if best_end_startpoint is not None:
+            if best_end_startpoint is not None and best_start_endpoint is not None:
                 bridge_start = self.graph.nodes[best_start_endpoint[0]]
                 bridge_end = self.graph.nodes[best_end_startpoint]
                 
@@ -610,16 +610,17 @@ class WaterwayRouteCalculator:
                         print(f"  Added end component waterway path: {len(best_end_route)} nodes, {best_end_distance:.2f}m")
             else:
                 # Direct bridge to end point
-                bridge_start = self.graph.nodes[best_start_endpoint[0]]
-                bridge_distance = bridge_start.distance_to(end_waypoint)
-                
-                route_segments.append({
-                    'type': 'straight_line_bridge',
-                    'geometry': [(bridge_start.lat, bridge_start.lon), (end_waypoint.lat, end_waypoint.lon)],
-                    'distance': bridge_distance,
-                    'nodes': [best_start_endpoint[0]]
-                })
-                print(f"  Added direct bridge to destination: {bridge_distance:.2f}m")
+                if best_start_endpoint is not None:
+                    bridge_start = self.graph.nodes[best_start_endpoint[0]]
+                    bridge_distance = bridge_start.distance_to(end_waypoint)
+                    
+                    route_segments.append({
+                        'type': 'straight_line_bridge',
+                        'geometry': [(bridge_start.lat, bridge_start.lon), (end_waypoint.lat, end_waypoint.lon)],
+                        'distance': bridge_distance,
+                        'nodes': [best_start_endpoint[0]]
+                    })
+                    print(f"  Added direct bridge to destination: {bridge_distance:.2f}m")
         else:
             # Fallback to straight line if no meaningful waterway routing possible
             print(f"No meaningful waterway routing possible - using straight line")
