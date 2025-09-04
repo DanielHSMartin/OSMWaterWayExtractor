@@ -46,6 +46,11 @@ processing:
   # explanation: maximum distance to move vertices during simplification
   simplification_tolerance_m: 5.0
 
+  # Node-edge proximity threshold in meters (float)
+  # options: any positive float (typical: 0.5, 1.0, 2.0)
+  # explanation: maximum distance for detecting nodes near edges for splitting
+  node_edge_proximity_threshold_m: 6
+
 clustering:
   # Maximum allowed displacement multiplier relative to snap_tolerance_m (float)
   # options: >1.0 (e.g., 1.0..10.0)
