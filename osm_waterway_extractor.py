@@ -2064,6 +2064,8 @@ class ModernWaterwayGraphBuilder:
                 all_endpoints.add(coords[-1])  # End point
         
         logger.info(f"Found {len(all_endpoints)} unique endpoint nodes to check against edges")
+        for i, endpoint in enumerate(list(all_endpoints)[:10]):  # Show first 10 endpoints for debugging
+            logger.debug(f"  Endpoint {i+1}: ({endpoint[0]:.6f}, {endpoint[1]:.6f})")
         
         # Create spatial index for efficient proximity detection
         try:
@@ -2124,6 +2126,12 @@ class ModernWaterwayGraphBuilder:
                     # Calculate distance from node to edge
                     distance = edge_line.distance(point)
                     distance_meters = distance * 111000  # rough conversion to meters
+                    
+                    # Debug logging for close proximities
+                    if distance_meters < 1.0:  # Log distances under 1 meter for debugging
+                        logger.debug(f"Node ({endpoint[0]:.6f}, {endpoint[1]:.6f}) is {distance_meters:.2f}m from edge {edge_idx} (waterway {waterways[edge_idx]['id']})")
+                        logger.debug(f"  Edge coordinates: {edge_coords}")
+                        logger.debug(f"  Is endpoint: {is_endpoint_of_edge}, Is interior: {is_interior_point}")
                     
                     if distance_meters < proximity_threshold and distance_meters < closest_distance:
                         closest_distance = distance_meters
@@ -3491,6 +3499,60 @@ def create_test_waterways() -> List[Dict]:
     ]
 
 
+def create_brazil_issue_test_waterways() -> List[Dict]:
+    """Create synthetic test waterways that reproduce the Brazil routing issue."""
+    # Create a scenario similar to the Brazil issue:
+    # Point A: -3.14269,-60.02686
+    # Point B: -3.35328,-58.73837  (should be very close to an edge but not connected)
+    # Point C: -7.50091, -63.01570
+    
+    # The edge that Point B should be close to connects nodes around -3.34970,-58.74758 and -3.37354,-58.68622
+    return [
+        {
+            'id': 1001,  # Main waterway from A toward the connection point
+            'coordinates': [
+                (-3.14269, -60.02686),     # Point A (start)
+                (-3.20000, -59.80000),     # Intermediate point
+                (-3.30000, -59.00000),     # Intermediate point
+                (-3.34970, -58.74758),     # Node that's close to Point B
+            ],
+            'tags': {'waterway': 'river', 'name': 'Test River AB Part 1'}
+        },
+        {
+            'id': 1002,  # Continuation from connection point toward C 
+            'coordinates': [
+                (-3.34970, -58.74758),     # Node that's close to Point B (start of edge near Point B)
+                (-3.37354, -58.68622),     # Other end of the edge near Point B
+                (-4.00000, -59.50000),     # Intermediate point
+                (-5.50000, -61.00000),     # Intermediate point  
+                (-7.50091, -63.01570),     # Point C (end)
+            ],
+            'tags': {'waterway': 'river', 'name': 'Test River BC Part 1'}
+        },
+        {
+            'id': 1003,  # Point B as an isolated endpoint that should be close to the main edge
+            'coordinates': [
+                (-3.35328, -58.73837),     # Point B (very close to edge between -3.34970,-58.74758 and -3.37354,-58.68622)
+                (-3.35500, -58.73000),     # Slightly away from the main edge
+            ],
+            'tags': {'waterway': 'stream', 'name': 'Test Point B Stream'}
+        },
+        {
+            'id': 1004,  # Another endpoint near Point B (from different waterway for alternate routing) 
+            'coordinates': [
+                (-3.35328, -58.73837),     # Point B (exact same location as start of stream 1003)
+                (-3.40000, -58.50000),     # Long detour start
+                (-3.50000, -58.20000),     # Long detour
+                (-4.20000, -58.00000),     # Long detour
+                (-5.00000, -59.80000),     # Long detour
+                (-6.50000, -61.50000),     # Long detour
+                (-7.50091, -63.01570),     # Point C (end) 
+            ],
+            'tags': {'waterway': 'river', 'name': 'Test Long Detour Route'}
+        }
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract and clean waterway networks from OSM PBF files (v2.1)",
@@ -3511,7 +3573,7 @@ Attribution:
         """
     )
     
-    parser.add_argument('input_file', help='Path to input OSM PBF file (use "test" for synthetic test data)')
+    parser.add_argument('input_file', help='Path to input OSM PBF file (use "test" for synthetic test data, "brazil_issue" for Brazil issue test data)')
     parser.add_argument('--config', default='config.yaml',
                         help='Path to YAML configuration file (default: config.yaml)')
     
@@ -3557,6 +3619,9 @@ Attribution:
         if args.input_file.lower() == "test":
             logger.info("Using synthetic test data")
             waterways = create_test_waterways()
+        elif args.input_file.lower() == "brazil_issue":
+            logger.info("Using Brazil issue test data")
+            waterways = create_brazil_issue_test_waterways()
         else:
             cache_file = get_cache_filename(args.input_file, config) if config.enable_parameter_based_caching else None
             waterways = extract_waterways(args.input_file, config, cache_file)
