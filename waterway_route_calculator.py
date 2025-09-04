@@ -205,6 +205,59 @@ class Edge:
                 total_distance += closest_point.distance_to(first_added)
         
         return geometry, total_distance
+
+    def get_geometry_from_node(self, source_node_id: int, target_point: Point) -> Tuple[List[Tuple[float, float]], float]:
+        """Get geometry from one of the edge's nodes to a point on this edge following the edge."""
+        # Determine which end node we're starting from
+        if source_node_id not in [self.start_node, self.end_node]:
+            raise ValueError(f"Source node {source_node_id} is not an endpoint of edge {self.id}")
+        
+        # Get position information for the target point
+        closest_point, _, seg_idx, ratio = self.get_closest_point_with_position(target_point)
+        
+        geometry = []
+        total_distance = 0.0
+        
+        if source_node_id == self.start_node:
+            # Navigate from start of edge towards the target point
+            # Add the starting node coordinate
+            geometry.append(self.coordinates[0])
+            
+            # Add coordinates from start to the target segment
+            for i in range(0, seg_idx):
+                curr_coord = self.coordinates[i]
+                next_coord = self.coordinates[i + 1]
+                geometry.append(next_coord)
+                total_distance += haversine_distance(curr_coord[0], curr_coord[1], next_coord[0], next_coord[1])
+            
+            # Add distance from last coordinate to the closest point
+            if seg_idx > 0:
+                last_coord = Point(self.coordinates[seg_idx][0], self.coordinates[seg_idx][1])
+                total_distance += last_coord.distance_to(closest_point)
+            
+            # Add the target point
+            geometry.append((closest_point.lat, closest_point.lon))
+        else:
+            # Navigate from end of edge towards the target point (source_node_id == self.end_node)
+            # Add the starting node coordinate
+            geometry.append(self.coordinates[-1])
+            
+            # Add coordinates from end back to the target segment
+            for i in range(len(self.coordinates) - 1, seg_idx, -1):
+                curr_coord = self.coordinates[i]
+                prev_coord = self.coordinates[i - 1]
+                geometry.append(prev_coord)
+                total_distance += haversine_distance(curr_coord[0], curr_coord[1], prev_coord[0], prev_coord[1])
+            
+            # Add distance from last coordinate to the closest point
+            if seg_idx + 1 < len(self.coordinates):
+                last_coord = Point(self.coordinates[seg_idx + 1][0], self.coordinates[seg_idx + 1][1])
+                total_distance += last_coord.distance_to(closest_point)
+            
+            # Add the target point
+            geometry.append((closest_point.lat, closest_point.lon))
+        
+        return geometry, total_distance
     
     def get_nearest_node_via_edge(self, point: Point) -> Tuple[int, float]:
         """Find which end node of this edge is closer to reach via the edge geometry."""
@@ -617,8 +670,59 @@ class WaterwayRouteCalculator:
                     end_node_for_pathfinding = nearest_end_node
             else:
                 print(f"Finding waterway path from edge {start_edge.id} to edge {end_edge.id}")
-                # Find nearest node for end edge for pathfinding
-                nearest_end_node, distance_to_end_node = end_edge.get_nearest_node_via_edge(end_point)
+                # Choose the better end node for pathfinding based on overall route efficiency
+                # Try both nodes and see which gives a better overall path
+                start_node_coord = self.graph.nodes[start_node_for_pathfinding]
+                
+                # Get coordinates for both possible end nodes
+                end_option1_coord = self.graph.nodes[end_edge.start_node]
+                end_option2_coord = self.graph.nodes[end_edge.end_node]
+                
+                # Calculate straight-line distances from start node to both end options
+                dist_to_option1 = start_node_coord.distance_to(end_option1_coord)
+                dist_to_option2 = start_node_coord.distance_to(end_option2_coord)
+                
+                # Calculate edge distances from end point to both end options
+                option1_edge_distance = 0.0
+                option2_edge_distance = 0.0
+                
+                closest_point, _, seg_idx, ratio = end_edge.get_closest_point_with_position(end_point)
+                
+                # Distance to start node (option 1) via edge
+                for i in range(seg_idx, 0, -1):
+                    curr_coord = end_edge.coordinates[i]
+                    prev_coord = end_edge.coordinates[i - 1]
+                    option1_edge_distance += haversine_distance(curr_coord[0], curr_coord[1], prev_coord[0], prev_coord[1])
+                if seg_idx > 0:
+                    segment_start = Point(end_edge.coordinates[seg_idx][0], end_edge.coordinates[seg_idx][1])
+                    option1_edge_distance += closest_point.distance_to(segment_start)
+                
+                # Distance to end node (option 2) via edge  
+                for i in range(seg_idx, len(end_edge.coordinates) - 1):
+                    curr_coord = end_edge.coordinates[i]
+                    next_coord = end_edge.coordinates[i + 1]
+                    option2_edge_distance += haversine_distance(curr_coord[0], curr_coord[1], next_coord[0], next_coord[1])
+                if seg_idx + 1 < len(end_edge.coordinates):
+                    segment_end = Point(end_edge.coordinates[seg_idx + 1][0], end_edge.coordinates[seg_idx + 1][1])
+                    option2_edge_distance += closest_point.distance_to(segment_end)
+                
+                # Choose the option that minimizes the overall route (pathfinding + edge distance)
+                # We use a weighted sum: pathfinding distance + edge distance
+                total_option1 = dist_to_option1 + option1_edge_distance
+                total_option2 = dist_to_option2 + option2_edge_distance
+                
+                print(f"  Option 1 (start node {end_edge.start_node}): pathfinding={dist_to_option1:.2f}m, edge={option1_edge_distance:.2f}m, total={total_option1:.2f}m")
+                print(f"  Option 2 (end node {end_edge.end_node}): pathfinding={dist_to_option2:.2f}m, edge={option2_edge_distance:.2f}m, total={total_option2:.2f}m")
+                
+                if total_option1 <= total_option2:
+                    nearest_end_node = end_edge.start_node
+                    distance_to_end_node = option1_edge_distance
+                    print(f"  Selected start node {nearest_end_node} (better total cost)")
+                else:
+                    nearest_end_node = end_edge.end_node
+                    distance_to_end_node = option2_edge_distance
+                    print(f"  Selected end node {nearest_end_node} (better total cost)")
+                
                 end_node_for_pathfinding = nearest_end_node
                 
             # If we have different edges or different nodes on same edge, do pathfinding
@@ -636,11 +740,9 @@ class WaterwayRouteCalculator:
                     # Now add connection from end of path to final waypoint via edge geometry
                     if end_distance > 0.1:
                         print(f"Following edge geometry from node {end_node_for_pathfinding} to final waypoint ({distance_to_end_node:.2f}m)")
-                        edge_from_node_geometry, edge_from_node_distance = end_edge.get_geometry_to_node(end_point, end_node_for_pathfinding)
+                        edge_from_node_geometry, edge_from_node_distance = end_edge.get_geometry_from_node(end_node_for_pathfinding, end_point)
                         if len(edge_from_node_geometry) > 1:
-                            # Reverse the geometry since we want to go from node to point, not point to node
-                            reversed_geometry = list(reversed(edge_from_node_geometry))
-                            segment_geometry.extend(reversed_geometry[1:])  # Skip first to avoid duplication
+                            segment_geometry.extend(edge_from_node_geometry[1:])  # Skip first to avoid duplication
                             segment_distance += edge_from_node_distance
                         
                         # Add the final waypoint
@@ -648,11 +750,9 @@ class WaterwayRouteCalculator:
                         segment_distance += end_distance
                     else:
                         print(f"End waypoint is already on edge, following edge geometry ({distance_to_end_node:.2f}m)")
-                        edge_from_node_geometry, edge_from_node_distance = end_edge.get_geometry_to_node(end_point, end_node_for_pathfinding)
+                        edge_from_node_geometry, edge_from_node_distance = end_edge.get_geometry_from_node(end_node_for_pathfinding, end_point)
                         if len(edge_from_node_geometry) > 1:
-                            # Reverse the geometry since we want to go from node to point
-                            reversed_geometry = list(reversed(edge_from_node_geometry))
-                            segment_geometry.extend(reversed_geometry[1:])  # Skip first to avoid duplication
+                            segment_geometry.extend(edge_from_node_geometry[1:])  # Skip first to avoid duplication
                             segment_distance += edge_from_node_distance
                     
                     final_connection_needed = False
