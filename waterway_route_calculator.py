@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.3-fix-reverse-edge-geometry"
+SCRIPT_VERSION = "2.1.4-fix-route-direction-bug"
 
 import json
 import gzip
@@ -707,21 +707,15 @@ class WaterwayRouteCalculator:
                     option2_edge_distance += closest_point.distance_to(segment_end)
                 
                 # Choose the option that minimizes the overall route (pathfinding + edge distance)
-                # We use a weighted sum: pathfinding distance + edge distance
                 total_option1 = dist_to_option1 + option1_edge_distance
                 total_option2 = dist_to_option2 + option2_edge_distance
-                
-                print(f"  Option 1 (start node {end_edge.start_node}): pathfinding={dist_to_option1:.2f}m, edge={option1_edge_distance:.2f}m, total={total_option1:.2f}m")
-                print(f"  Option 2 (end node {end_edge.end_node}): pathfinding={dist_to_option2:.2f}m, edge={option2_edge_distance:.2f}m, total={total_option2:.2f}m")
                 
                 if total_option1 <= total_option2:
                     nearest_end_node = end_edge.start_node
                     distance_to_end_node = option1_edge_distance
-                    print(f"  Selected start node {nearest_end_node} (better total cost)")
                 else:
                     nearest_end_node = end_edge.end_node
                     distance_to_end_node = option2_edge_distance
-                    print(f"  Selected end node {nearest_end_node} (better total cost)")
                 
                 end_node_for_pathfinding = nearest_end_node
                 
