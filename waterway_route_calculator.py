@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.4-fix-route-direction-bug"
+SCRIPT_VERSION = "2.1.5-fix-direction-selection"
 
 import json
 import gzip
@@ -289,6 +289,49 @@ class Edge:
         
         # Return the closer node and the distance to it
         if distance_to_start <= distance_to_end:
+            return self.start_node, distance_to_start
+        else:
+            return self.end_node, distance_to_end
+
+    def get_optimal_node_toward_destination(self, point: Point, destination: Point) -> Tuple[int, float]:
+        """Find which end node of this edge leads toward the destination most directly."""
+        closest_point, _, seg_idx, ratio = self.get_closest_point_with_position(point)
+        
+        # Calculate distance to start node via edge
+        distance_to_start = 0.0
+        for i in range(seg_idx, 0, -1):
+            curr_coord = self.coordinates[i]
+            prev_coord = self.coordinates[i - 1]
+            distance_to_start += haversine_distance(curr_coord[0], curr_coord[1], prev_coord[0], prev_coord[1])
+        
+        # Add distance from closest point to segment start
+        if seg_idx > 0:
+            segment_start = Point(self.coordinates[seg_idx][0], self.coordinates[seg_idx][1])
+            distance_to_start += closest_point.distance_to(segment_start)
+        
+        # Calculate distance to end node via edge
+        distance_to_end = 0.0
+        for i in range(seg_idx, len(self.coordinates) - 1):
+            curr_coord = self.coordinates[i]
+            next_coord = self.coordinates[i + 1]
+            distance_to_end += haversine_distance(curr_coord[0], curr_coord[1], next_coord[0], next_coord[1])
+        
+        # Add distance from closest point to segment end
+        if seg_idx + 1 < len(self.coordinates):
+            segment_end = Point(self.coordinates[seg_idx + 1][0], self.coordinates[seg_idx + 1][1])
+            distance_to_end += closest_point.distance_to(segment_end)
+        
+        # Get the actual node coordinates to calculate straight-line distance to destination
+        start_node_coord = Point(self.coordinates[0][0], self.coordinates[0][1])
+        end_node_coord = Point(self.coordinates[-1][0], self.coordinates[-1][1])
+        
+        # Calculate straight-line distance from each node to the destination
+        start_to_dest_direct = start_node_coord.distance_to(destination)
+        end_to_dest_direct = end_node_coord.distance_to(destination)
+        
+        # Choose the node that provides the best overall direction toward destination
+        # This considers both the distance along the edge and the direction toward the destination
+        if start_to_dest_direct < end_to_dest_direct:
             return self.start_node, distance_to_start
         else:
             return self.end_node, distance_to_end
@@ -613,33 +656,33 @@ class WaterwayRouteCalculator:
             # Connect to the waterway network following edge geometry
             start_node_for_pathfinding = None
             
-            # Follow edge geometry from waypoint to nearest node of start edge
+            # Follow edge geometry from waypoint to optimal node toward destination
             if start_distance > 0.1:  # Only add if not already on the edge
-                nearest_start_node, distance_to_start_node = start_edge.get_nearest_node_via_edge(start_point)
-                print(f"Following edge geometry from waypoint to node {nearest_start_node} ({distance_to_start_node:.2f}m)")
+                optimal_start_node, distance_to_start_node = start_edge.get_optimal_node_toward_destination(start_point, end_point)
+                print(f"Following edge geometry from waypoint to node {optimal_start_node} ({distance_to_start_node:.2f}m) toward destination")
                 
-                # Get geometry from waypoint to closest point on edge, then along edge to nearest node
+                # Get geometry from waypoint to closest point on edge, then along edge to optimal node
                 segment_geometry.append((start_point.lat, start_point.lon))
                 segment_distance += start_distance
                 
-                # Follow edge geometry to the nearest node
-                edge_to_node_geometry, edge_to_node_distance = start_edge.get_geometry_to_node(start_point, nearest_start_node)
+                # Follow edge geometry to the optimal node
+                edge_to_node_geometry, edge_to_node_distance = start_edge.get_geometry_to_node(start_point, optimal_start_node)
                 if len(edge_to_node_geometry) > 1:
                     segment_geometry.extend(edge_to_node_geometry[1:])  # Skip first point (already added above as closest point)
                     segment_distance += edge_to_node_distance
                 
-                start_node_for_pathfinding = nearest_start_node
+                start_node_for_pathfinding = optimal_start_node
             else:
-                # Already on the edge, find nearest node
-                nearest_start_node, distance_to_start_node = start_edge.get_nearest_node_via_edge(start_point)
-                print(f"Waypoint is on edge, using nearest node {nearest_start_node} ({distance_to_start_node:.2f}m)")
+                # Already on the edge, find optimal node toward destination
+                optimal_start_node, distance_to_start_node = start_edge.get_optimal_node_toward_destination(start_point, end_point)
+                print(f"Waypoint is on edge, using optimal node {optimal_start_node} ({distance_to_start_node:.2f}m) toward destination")
                 
-                # Follow edge geometry to the nearest node
-                edge_to_node_geometry, edge_to_node_distance = start_edge.get_geometry_to_node(start_point, nearest_start_node)
+                # Follow edge geometry to the optimal node
+                edge_to_node_geometry, edge_to_node_distance = start_edge.get_geometry_to_node(start_point, optimal_start_node)
                 segment_geometry.extend(edge_to_node_geometry)
                 segment_distance += edge_to_node_distance
                 
-                start_node_for_pathfinding = nearest_start_node
+                start_node_for_pathfinding = optimal_start_node
             
             # Find path through waterway network
             final_connection_needed = True
@@ -654,12 +697,12 @@ class WaterwayRouteCalculator:
                 print(f"Start and end points are on the same edge {start_edge.id}")
                 # Both points are on the same edge - we need to handle this specially
                 
-                # Find the nearest nodes for both points
-                nearest_end_node, distance_to_end_node = end_edge.get_nearest_node_via_edge(end_point)
+                # Find the optimal node for end point (toward start for reverse direction)
+                optimal_end_node, distance_to_end_node = end_edge.get_optimal_node_toward_destination(end_point, start_point)
                 
-                # If both points use the same nearest node, connect directly along edge
-                if start_node_for_pathfinding == nearest_end_node:
-                    print(f"  Both points connect to same node {nearest_end_node}, using direct edge connection")
+                # If both points use the same optimal node, connect directly along edge
+                if start_node_for_pathfinding == optimal_end_node:
+                    print(f"  Both points connect to same node {optimal_end_node}, using direct edge connection")
                     # Follow edge geometry from start point to end point
                     edge_geometry, edge_distance = start_edge.get_geometry_between_points(start_point, end_point)
                     if len(edge_geometry) > 1:
@@ -668,9 +711,9 @@ class WaterwayRouteCalculator:
                         segment_distance += edge_distance
                     final_connection_needed = False
                 else:
-                    print(f"  Start connects to node {start_node_for_pathfinding}, end connects to node {nearest_end_node}")
+                    print(f"  Start connects to node {start_node_for_pathfinding}, end connects to node {optimal_end_node}")
                     # Use pathfinding between the two nodes, then connect to end point
-                    end_node_for_pathfinding = nearest_end_node
+                    end_node_for_pathfinding = optimal_end_node
             else:
                 print(f"Finding waterway path from edge {start_edge.id} to edge {end_edge.id}")
                 # Try both possible end nodes for pathfinding and choose the one that gives better overall route
@@ -791,13 +834,6 @@ class WaterwayRouteCalculator:
         print(f"Total distance: {total_distance:.2f}m")
         print(f"Total geometry points: {len(all_geometry)}")
         print(f"Route segments: {len(route_segments)}")
-        
-        # Remove backtracking patterns
-        print(f"Removing backtracking patterns...")
-        cleaned_geometry = self.remove_backtracking(all_geometry)
-        if len(cleaned_geometry) < len(all_geometry):
-            print(f"Removed {len(all_geometry) - len(cleaned_geometry)} backtracking coordinates")
-            all_geometry = cleaned_geometry
         
         return {
             'type': 'route_calculation_result',
@@ -1052,43 +1088,6 @@ class WaterwayRouteCalculator:
         
         return route_segments, final_handled
     
-    def remove_backtracking(self, geometry: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Remove obvious backtracking patterns from route geometry."""
-        if len(geometry) < 3:
-            return geometry
-        
-        # Look for patterns where we go A->B->A (or close to A)
-        cleaned_geometry = [geometry[0]]
-        
-        i = 1
-        while i < len(geometry):
-            current_point = Point(geometry[i][0], geometry[i][1])
-            
-            # Look ahead to see if we return close to a previous point
-            backtrack_detected = False
-            for j in range(i + 1, min(i + 50, len(geometry))):  # Look ahead up to 50 points
-                future_point = Point(geometry[j][0], geometry[j][1])
-                
-                # Check if future point is close to any of the last 10 points we added
-                for k in range(max(0, len(cleaned_geometry) - 10), len(cleaned_geometry)):
-                    past_point = Point(cleaned_geometry[k][0], cleaned_geometry[k][1])
-                    
-                    # If future point is very close to a past point, we have backtracking
-                    if future_point.distance_to(past_point) < 50:  # Within 50 meters
-                        # Skip the backtracking section
-                        print(f"  Detected backtracking: skipping {j - i} coordinates")
-                        i = j
-                        backtrack_detected = True
-                        break
-                
-                if backtrack_detected:
-                    break
-            
-            if not backtrack_detected:
-                cleaned_geometry.append(geometry[i])
-                i += 1
-        
-        return cleaned_geometry
     
     def create_geojson_output(self, route_result: Dict, waypoints: List[Point]) -> Dict:
         """Create GeoJSON output for the calculated route."""
