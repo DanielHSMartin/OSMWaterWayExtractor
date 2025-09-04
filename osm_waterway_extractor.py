@@ -276,8 +276,28 @@ class Config:
                 'enable_geometry_simplification': self.enable_geometry_simplification,
                 'simplification_tolerance_m': self.simplification_tolerance_m,
             }
+        elif step_name == "intersections":
+            # Parameters that affect intersection detection (depends on simplified)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+            }
+        elif step_name == "node_edge_splits":
+            # Parameters that affect node-edge splitting (depends on intersections)
+            step_params = {
+                'waterway_types': self.waterway_types,
+                'coordinate_precision': self.coordinate_precision,
+                'min_fragment_length_m': self.min_fragment_length_m,
+                'enable_geometry_simplification': self.enable_geometry_simplification,
+                'simplification_tolerance_m': self.simplification_tolerance_m,
+                'snap_tolerance_m': self.snap_tolerance_m,  # May affect proximity detection
+                'distance_calculation_method': self.distance_calculation_method,
+            }
         elif step_name == "clustering":
-            # Parameters that affect clustering (depends on endpoints)
+            # Parameters that affect clustering (depends on node_edge_splits)
             step_params = {
                 'waterway_types': self.waterway_types,
                 'coordinate_precision': self.coordinate_precision,
@@ -1469,6 +1489,17 @@ class ModernWaterwayGraphBuilder:
             if intersections_cache_file:
                 save_intermediate_cache(waterways_with_intersections, intersections_cache_file)
         
+        # Step 1.85: Detect nodes near edges and split edges to connect them
+        logger.info("Step 1.85: Detecting nodes near edges and splitting edges...")
+        node_edge_cache_file = get_intermediate_cache_filename(input_file, self.config, "node_edge_splits") if self.config.enable_parameter_based_caching else None
+        
+        if node_edge_cache_file and os.path.exists(node_edge_cache_file):
+            waterways_with_node_splits = load_intermediate_cache(node_edge_cache_file)
+        else:
+            waterways_with_node_splits = self._detect_and_split_node_edge_proximity(waterways_with_intersections)
+            if node_edge_cache_file:
+                save_intermediate_cache(waterways_with_node_splits, node_edge_cache_file)
+        
         # Step 2: Extract all unique endpoints and junctions
         logger.info("Step 2: Extracting endpoints and identifying junctions...")
         endpoints_cache_file = get_intermediate_cache_filename(input_file, self.config, "endpoints") if self.config.enable_parameter_based_caching else None
@@ -1477,7 +1508,7 @@ class ModernWaterwayGraphBuilder:
             cached_data = load_intermediate_cache(endpoints_cache_file)
             endpoints, junctions = cached_data['endpoints'], cached_data['junctions']
         else:
-            endpoints, junctions = self._extract_endpoints_and_junctions(waterways_with_intersections)
+            endpoints, junctions = self._extract_endpoints_and_junctions(waterways_with_node_splits)
             if endpoints_cache_file:
                 save_intermediate_cache({'endpoints': endpoints, 'junctions': junctions}, endpoints_cache_file)
         
@@ -1499,7 +1530,7 @@ class ModernWaterwayGraphBuilder:
         if edges_cache_file and os.path.exists(edges_cache_file):
             edges = load_intermediate_cache(edges_cache_file)
         else:
-            edges = self._create_edges(waterways_with_intersections, coord_mapping)
+            edges = self._create_edges(waterways_with_node_splits, coord_mapping)
             if edges_cache_file:
                 save_intermediate_cache(edges, edges_cache_file)
         
@@ -2009,6 +2040,295 @@ class ModernWaterwayGraphBuilder:
             
         result = self._split_waterways_at_intersections(waterways, intersection_points)
         return result
+    
+    def _detect_and_split_node_edge_proximity(self, waterways: List[Dict]) -> List[Dict]:
+        """Detect nodes that are very close to edges and split those edges to connect the nodes."""
+        if len(waterways) < 2:
+            logger.info("Less than 2 waterways, skipping node-edge proximity detection")
+            # Store empty metrics
+            self.qa_metrics.update({
+                'node_edge_splits_detected': 0,
+                'node_edge_splits_inserted': 0,
+                'edges_split_for_nodes': 0
+            })
+            return waterways
+        
+        logger.info(f"Detecting nodes near edges for {len(waterways)} waterways...")
+        
+        # Extract all unique coordinates (potential nodes) from waterway endpoints
+        all_endpoints = set()
+        for waterway in waterways:
+            coords = waterway['coordinates']
+            if len(coords) >= 2:
+                all_endpoints.add(coords[0])  # Start point
+                all_endpoints.add(coords[-1])  # End point
+        
+        logger.info(f"Found {len(all_endpoints)} unique endpoint nodes to check against edges")
+        
+        # Create spatial index for efficient proximity detection
+        try:
+            from rtree import index
+            spatial_index = index.Index()
+            
+            # Index all waterway line segments  
+            waterway_lines = {}
+            for i, waterway in enumerate(waterways):
+                coords = waterway['coordinates']
+                if len(coords) >= 2:
+                    line = LineString([(lon, lat) for lat, lon in coords])
+                    waterway_lines[i] = line
+                    # Add to spatial index using bounds
+                    spatial_index.insert(i, line.bounds)
+            
+            logger.info(f"Created spatial index with {len(waterway_lines)} waterway lines")
+            
+            # Find nodes that are very close to edges but not connected
+            proximity_threshold = 0.5  # 0.5 meters tolerance for detecting nearby nodes
+            tolerance_degrees = proximity_threshold * 0.00001  # rough conversion to degrees
+            
+            nodes_to_insert = []  # List of (node_coord, edge_index, insertion_point) tuples
+            processed_endpoints = 0
+            progress_interval = max(1, len(all_endpoints) // 20)  # Report progress every 5%
+            
+            for idx, endpoint in enumerate(all_endpoints):
+                # Report progress periodically
+                if idx % progress_interval == 0 and idx > 0:
+                    progress_pct = (idx * 100) // len(all_endpoints)
+                    logger.info(f"Node-edge proximity detection progress: {progress_pct}% ({idx}/{len(all_endpoints)} nodes processed, {len(nodes_to_insert)} proximities found so far)")
+                
+                point = Point(endpoint[1], endpoint[0])  # Shapely uses (lon, lat)
+                
+                # Query spatial index for potential nearby edges
+                point_buffer = tolerance_degrees
+                bbox = (point.x - point_buffer, point.y - point_buffer, 
+                       point.x + point_buffer, point.y + point_buffer)
+                potential_edges = list(spatial_index.intersection(bbox))
+                
+                closest_distance = float('inf')
+                closest_edge_idx = None
+                closest_insertion_point = None
+                
+                for edge_idx in potential_edges:
+                    edge_line = waterway_lines[edge_idx]
+                    edge_coords = waterways[edge_idx]['coordinates']
+                    
+                    # Check if this endpoint is already part of this edge
+                    is_endpoint_of_edge = (endpoint == edge_coords[0] or endpoint == edge_coords[-1])
+                    
+                    # Check if this endpoint is already an interior point of this edge
+                    is_interior_point = endpoint in edge_coords[1:-1]
+                    
+                    if is_endpoint_of_edge or is_interior_point:
+                        continue  # Skip if node is already connected to this edge
+                    
+                    # Calculate distance from node to edge
+                    distance = edge_line.distance(point)
+                    distance_meters = distance * 111000  # rough conversion to meters
+                    
+                    if distance_meters < proximity_threshold and distance_meters < closest_distance:
+                        closest_distance = distance_meters
+                        closest_edge_idx = edge_idx
+                        
+                        # Find the closest point on the edge
+                        closest_point_on_edge = edge_line.interpolate(edge_line.project(point))
+                        closest_insertion_point = (closest_point_on_edge.y, closest_point_on_edge.x)  # Convert back to (lat, lon)
+                
+                # If we found a nearby edge, record it for insertion
+                if closest_edge_idx is not None and closest_distance < proximity_threshold:
+                    nodes_to_insert.append((endpoint, closest_edge_idx, closest_insertion_point, closest_distance))
+                    logger.debug(f"Node ({endpoint[0]:.6f}, {endpoint[1]:.6f}) is {closest_distance:.2f}m from edge {closest_edge_idx}")
+                
+                processed_endpoints += 1
+            
+            logger.info(f"Found {len(nodes_to_insert)} nodes within {proximity_threshold}m of edges")
+            
+            # Store metrics
+            self.qa_metrics.update({
+                'node_edge_splits_detected': len(nodes_to_insert),
+                'node_edge_splits_inserted': 0,  # Will be updated below
+                'edges_split_for_nodes': 0  # Will be updated below
+            })
+            
+            if not nodes_to_insert:
+                return waterways
+            
+            # Group insertions by edge to handle multiple nodes near the same edge
+            insertions_by_edge = {}
+            for node_coord, edge_idx, insertion_point, distance in nodes_to_insert:
+                if edge_idx not in insertions_by_edge:
+                    insertions_by_edge[edge_idx] = []
+                insertions_by_edge[edge_idx].append((node_coord, insertion_point, distance))
+            
+            # Apply insertions to edges
+            modified_waterways = []
+            edges_split = 0
+            total_insertions = 0
+            
+            for i, waterway in enumerate(waterways):
+                if i in insertions_by_edge:
+                    # This edge needs to be split
+                    insertions = insertions_by_edge[i]
+                    logger.info(f"Splitting edge {i} (waterway {waterway['id']}) to insert {len(insertions)} nearby nodes")
+                    
+                    # Split the edge for all nearby nodes
+                    split_waterways = self._split_edge_for_nearby_nodes(waterway, insertions)
+                    modified_waterways.extend(split_waterways)
+                    edges_split += 1
+                    total_insertions += len(insertions)
+                else:
+                    # Keep original edge
+                    modified_waterways.append(waterway)
+            
+            # Update metrics
+            self.qa_metrics.update({
+                'node_edge_splits_inserted': total_insertions,
+                'edges_split_for_nodes': edges_split
+            })
+            
+            logger.info(f"Split {edges_split} edges to insert {total_insertions} nearby nodes, resulting in {len(modified_waterways)} total waterways")
+            return modified_waterways
+            
+        except ImportError:
+            logger.warning("rtree library not available, skipping node-edge proximity detection")
+            # Store empty metrics
+            self.qa_metrics.update({
+                'node_edge_splits_detected': 0,
+                'node_edge_splits_inserted': 0,
+                'edges_split_for_nodes': 0
+            })
+            return waterways
+        except Exception as e:
+            logger.error(f"Error in node-edge proximity detection: {e}")
+            # Store empty metrics
+            self.qa_metrics.update({
+                'node_edge_splits_detected': 0,
+                'node_edge_splits_inserted': 0,
+                'edges_split_for_nodes': 0
+            })
+            return waterways
+    
+    def _split_edge_for_nearby_nodes(self, waterway: Dict, insertions: List[Tuple]) -> List[Dict]:
+        """Split a single edge to insert nearby nodes at appropriate positions."""
+        coords = waterway['coordinates']
+        
+        # Sort insertions by their position along the edge
+        def get_position_along_edge(insertion_point):
+            # Find the closest segment and position along the entire edge
+            min_segment_distance = float('inf')
+            best_segment_idx = 0
+            
+            for i in range(len(coords) - 1):
+                seg_start = coords[i]
+                seg_end = coords[i + 1]
+                
+                # Calculate distance from insertion point to this segment
+                dist = self._point_to_segment_distance(insertion_point, seg_start, seg_end)
+                if dist < min_segment_distance:
+                    min_segment_distance = dist
+                    best_segment_idx = i
+            
+            # Calculate total distance along edge up to this segment
+            total_distance = 0.0
+            for i in range(best_segment_idx):
+                total_distance += self.geod_calc.distance(coords[i], coords[i + 1])
+            
+            # Add distance within the segment
+            if best_segment_idx < len(coords) - 1:
+                seg_start = coords[best_segment_idx]
+                seg_end = coords[best_segment_idx + 1]
+                
+                # Project insertion point onto segment and calculate distance from segment start
+                ratio = self._project_point_onto_segment(insertion_point, seg_start, seg_end)
+                segment_distance = self.geod_calc.distance(seg_start, seg_end) * ratio
+                total_distance += segment_distance
+            
+            return total_distance
+        
+        # Sort insertions by position along edge
+        insertions_with_position = []
+        for node_coord, insertion_point, distance in insertions:
+            position = get_position_along_edge(insertion_point)
+            insertions_with_position.append((node_coord, insertion_point, distance, position))
+        
+        insertions_with_position.sort(key=lambda x: x[3])  # Sort by position
+        
+        # Create new waterway segments
+        result_waterways = []
+        current_coords = coords.copy()
+        
+        # Insert points in reverse order to maintain indices
+        for node_coord, insertion_point, distance, position in reversed(insertions_with_position):
+            # Find where to insert this point in the coordinate sequence
+            insertion_index = self._find_insertion_index(current_coords, insertion_point)
+            
+            # Round insertion point to same precision as other coordinates
+            rounded_insertion = (
+                round(insertion_point[0], self.config.coordinate_precision),
+                round(insertion_point[1], self.config.coordinate_precision)
+            )
+            
+            # Insert the rounded point
+            current_coords.insert(insertion_index, rounded_insertion)
+            
+            logger.debug(f"Inserted node ({node_coord[0]:.6f}, {node_coord[1]:.6f}) as point ({rounded_insertion[0]:.6f}, {rounded_insertion[1]:.6f}) at index {insertion_index}")
+        
+        # Create the modified waterway with all insertions
+        result_waterways.append({
+            'id': waterway['id'],
+            'coordinates': current_coords,
+            'tags': waterway['tags']
+        })
+        
+        return result_waterways
+    
+    def _point_to_segment_distance(self, point: Tuple[float, float], seg_start: Tuple[float, float], seg_end: Tuple[float, float]) -> float:
+        """Calculate distance from point to line segment."""
+        # Use geodesic distance calculation
+        # Project point onto segment and calculate distance
+        ratio = self._project_point_onto_segment(point, seg_start, seg_end)
+        
+        # Calculate the point on segment
+        lat_on_seg = seg_start[0] + ratio * (seg_end[0] - seg_start[0])
+        lon_on_seg = seg_start[1] + ratio * (seg_end[1] - seg_start[1])
+        
+        return self.geod_calc.distance(point, (lat_on_seg, lon_on_seg))
+    
+    def _project_point_onto_segment(self, point: Tuple[float, float], seg_start: Tuple[float, float], seg_end: Tuple[float, float]) -> float:
+        """Project point onto line segment and return ratio (0.0 = start, 1.0 = end)."""
+        # Vector from start to end
+        dx = seg_end[1] - seg_start[1]  # longitude difference
+        dy = seg_end[0] - seg_start[0]  # latitude difference
+        
+        # Vector from start to point
+        px = point[1] - seg_start[1]
+        py = point[0] - seg_start[0]
+        
+        # Project point onto segment
+        segment_length_sq = dx * dx + dy * dy
+        if segment_length_sq == 0:
+            return 0.0  # Start and end are the same
+        
+        t = (px * dx + py * dy) / segment_length_sq
+        return max(0.0, min(1.0, t))  # Clamp to [0, 1]
+    
+    def _find_insertion_index(self, coords: List[Tuple[float, float]], insertion_point: Tuple[float, float]) -> int:
+        """Find the best index to insert a point into a coordinate sequence."""
+        min_distance = float('inf')
+        best_index = 1  # Default to after first point
+        
+        # Check distance to each segment and find the best insertion point
+        for i in range(len(coords) - 1):
+            seg_start = coords[i]
+            seg_end = coords[i + 1]
+            
+            # Calculate distance from insertion point to this segment
+            distance = self._point_to_segment_distance(insertion_point, seg_start, seg_end)
+            
+            if distance < min_distance:
+                min_distance = distance
+                best_index = i + 1  # Insert after the start of this segment
+        
+        return best_index
     
 
     
@@ -2662,7 +2982,10 @@ class ModernWaterwayGraphBuilder:
     def _generate_qa_metrics(self, original_waterways: List[Dict], processed_waterways: List[Dict], 
                            nodes: List[Dict], edges: List[Dict], processing_time: float):
         """Generate comprehensive QA metrics per specification."""
-        self.qa_metrics = {
+        # Preserve existing metrics (intersection detection, node-edge splits) and add new ones
+        existing_metrics = getattr(self, 'qa_metrics', {})
+        
+        new_metrics = {
             'processing_time_seconds': processing_time,
             'original_waterways': len(original_waterways),
             'processed_waterways': len(processed_waterways),
@@ -2673,6 +2996,9 @@ class ModernWaterwayGraphBuilder:
             'snap_tolerance_m': self.config.snap_tolerance_m,
             'min_fragment_length_m': self.config.min_fragment_length_m
         }
+        
+        # Merge existing metrics with new ones (new ones take precedence)
+        self.qa_metrics = {**existing_metrics, **new_metrics}
         
         # Add clustering metrics
         self.qa_metrics.update(self.clusterer.cluster_metrics)
