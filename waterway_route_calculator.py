@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.7-enhanced-node-selection"
+SCRIPT_VERSION = "2.1.9-original-algorithm"
 
 import json
 import gzip
@@ -294,7 +294,7 @@ class Edge:
             return self.end_node, distance_to_end
 
     def get_optimal_node_toward_destination(self, point: Point, destination: Point, graph=None, debug: bool = False) -> Tuple[int, float]:
-        """Find which end node of this edge leads toward the destination most efficiently."""
+        """Find which end node of this edge leads toward the destination most directly."""
         closest_point, _, seg_idx, ratio = self.get_closest_point_with_position(point)
         
         # Calculate distance to start node via edge
@@ -329,41 +329,20 @@ class Edge:
         start_to_dest_direct = start_node_coord.distance_to(destination)
         end_to_dest_direct = end_node_coord.distance_to(destination)
         
-        # Enhanced heuristic: if we have graph information, consider node connectivity
-        start_connectivity = 1
-        end_connectivity = 1
-        if graph and hasattr(graph, 'adjacency_list'):
-            start_connectivity = len(graph.adjacency_list.get(self.start_node, []))
-            end_connectivity = len(graph.adjacency_list.get(self.end_node, []))
-        
-        # Calculate total estimated costs with connectivity bias
-        # Prefer nodes with more connections (better network integration)
-        connectivity_factor = 0.05  # 5% reduction in cost for each additional connection
-        start_connectivity_bonus = max(0, (start_connectivity - 1) * connectivity_factor)
-        end_connectivity_bonus = max(0, (end_connectivity - 1) * connectivity_factor)
-        
-        total_cost_via_start = distance_to_start + start_to_dest_direct
-        total_cost_via_end = distance_to_end + end_to_dest_direct
-        
-        # Apply connectivity bonus (reduce costs for better connected nodes)
-        adjusted_cost_via_start = total_cost_via_start * (1 - start_connectivity_bonus)
-        adjusted_cost_via_end = total_cost_via_end * (1 - end_connectivity_bonus)
-        
         if debug:
             print(f"    Edge {self.id} node selection debug:")
-            print(f"      Start node {self.start_node}: edge_dist={distance_to_start:.2f}m, straight_dist={start_to_dest_direct:.2f}m, connections={start_connectivity}")
-            print(f"        Total cost: {total_cost_via_start:.2f}m, adjusted: {adjusted_cost_via_start:.2f}m")
-            print(f"      End node {self.end_node}: edge_dist={distance_to_end:.2f}m, straight_dist={end_to_dest_direct:.2f}m, connections={end_connectivity}")
-            print(f"        Total cost: {total_cost_via_end:.2f}m, adjusted: {adjusted_cost_via_end:.2f}m")
+            print(f"      Start node {self.start_node}: edge_dist={distance_to_start:.2f}m, straight_dist={start_to_dest_direct:.2f}m")
+            print(f"      End node {self.end_node}: edge_dist={distance_to_end:.2f}m, straight_dist={end_to_dest_direct:.2f}m")
         
-        # Decision based on adjusted costs
-        if adjusted_cost_via_start <= adjusted_cost_via_end:
+        # Choose the node that provides the best overall direction toward destination
+        # This considers only the straight-line distance to destination (original algorithm)
+        if start_to_dest_direct < end_to_dest_direct:
             if debug:
-                print(f"      Decision: Start node {self.start_node} (better adjusted cost)")
+                print(f"      Decision: Start node {self.start_node} (closer to destination)")
             return self.start_node, distance_to_start
         else:
             if debug:
-                print(f"      Decision: End node {self.end_node} (better adjusted cost)")
+                print(f"      Decision: End node {self.end_node} (closer to destination)")
             return self.end_node, distance_to_end
 
 
