@@ -111,6 +111,7 @@ class Config:
     # Geometry simplification parameters
     enable_geometry_simplification: bool = True
     simplification_tolerance_m: float = 1.0
+    node_edge_proximity_threshold_m: float = 0.5
     
     # Clustering parameters
     max_displacement_multiplier: float = 1.5
@@ -180,7 +181,8 @@ class Config:
                 'distance_calculation_method': processing.get('distance_calculation_method', 'geodesic'),
                 'waterway_types': processing.get('waterway_types', ['river', 'canal']),
                 'enable_geometry_simplification': processing.get('enable_geometry_simplification', True),
-                'simplification_tolerance_m': processing.get('simplification_tolerance_m', 1.0)
+                'simplification_tolerance_m': processing.get('simplification_tolerance_m', 1.0),
+                'node_edge_proximity_threshold_m': processing.get('node_edge_proximity_threshold_m', 0.5)
             })
         
         if 'clustering' in data:
@@ -2085,7 +2087,7 @@ class ModernWaterwayGraphBuilder:
             logger.info(f"Created spatial index with {len(waterway_lines)} waterway lines")
             
             # Find nodes that are very close to edges but not connected
-            proximity_threshold = 0.5  # 0.5 meters tolerance for detecting nearby nodes
+            proximity_threshold = self.config.node_edge_proximity_threshold_m  # Use configurable threshold for detecting nearby nodes
             tolerance_degrees = proximity_threshold * 0.00001  # rough conversion to degrees
             
             nodes_to_insert = []  # List of (node_coord, edge_index, insertion_point) tuples
@@ -2176,7 +2178,7 @@ class ModernWaterwayGraphBuilder:
                 if i in insertions_by_edge:
                     # This edge needs to be split
                     insertions = insertions_by_edge[i]
-                    logger.info(f"Splitting edge {i} (waterway {waterway['id']}) to insert {len(insertions)} nearby nodes")
+                    #logger.info(f"Splitting edge {i} (waterway {waterway['id']}) to insert {len(insertions)} nearby nodes")
                     
                     # Split the edge for all nearby nodes
                     split_waterways = self._split_edge_for_nearby_nodes(waterway, insertions)
