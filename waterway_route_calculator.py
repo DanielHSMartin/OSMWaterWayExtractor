@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.5-fix-direction-selection"
+SCRIPT_VERSION = "2.1.7-enhanced-node-selection"
 
 import json
 import gzip
@@ -293,8 +293,8 @@ class Edge:
         else:
             return self.end_node, distance_to_end
 
-    def get_optimal_node_toward_destination(self, point: Point, destination: Point) -> Tuple[int, float]:
-        """Find which end node of this edge leads toward the destination most directly."""
+    def get_optimal_node_toward_destination(self, point: Point, destination: Point, graph=None, debug: bool = False) -> Tuple[int, float]:
+        """Find which end node of this edge leads toward the destination most efficiently."""
         closest_point, _, seg_idx, ratio = self.get_closest_point_with_position(point)
         
         # Calculate distance to start node via edge
@@ -329,11 +329,41 @@ class Edge:
         start_to_dest_direct = start_node_coord.distance_to(destination)
         end_to_dest_direct = end_node_coord.distance_to(destination)
         
-        # Choose the node that provides the best overall direction toward destination
-        # This considers both the distance along the edge and the direction toward the destination
-        if start_to_dest_direct < end_to_dest_direct:
+        # Enhanced heuristic: if we have graph information, consider node connectivity
+        start_connectivity = 1
+        end_connectivity = 1
+        if graph and hasattr(graph, 'adjacency_list'):
+            start_connectivity = len(graph.adjacency_list.get(self.start_node, []))
+            end_connectivity = len(graph.adjacency_list.get(self.end_node, []))
+        
+        # Calculate total estimated costs with connectivity bias
+        # Prefer nodes with more connections (better network integration)
+        connectivity_factor = 0.05  # 5% reduction in cost for each additional connection
+        start_connectivity_bonus = max(0, (start_connectivity - 1) * connectivity_factor)
+        end_connectivity_bonus = max(0, (end_connectivity - 1) * connectivity_factor)
+        
+        total_cost_via_start = distance_to_start + start_to_dest_direct
+        total_cost_via_end = distance_to_end + end_to_dest_direct
+        
+        # Apply connectivity bonus (reduce costs for better connected nodes)
+        adjusted_cost_via_start = total_cost_via_start * (1 - start_connectivity_bonus)
+        adjusted_cost_via_end = total_cost_via_end * (1 - end_connectivity_bonus)
+        
+        if debug:
+            print(f"    Edge {self.id} node selection debug:")
+            print(f"      Start node {self.start_node}: edge_dist={distance_to_start:.2f}m, straight_dist={start_to_dest_direct:.2f}m, connections={start_connectivity}")
+            print(f"        Total cost: {total_cost_via_start:.2f}m, adjusted: {adjusted_cost_via_start:.2f}m")
+            print(f"      End node {self.end_node}: edge_dist={distance_to_end:.2f}m, straight_dist={end_to_dest_direct:.2f}m, connections={end_connectivity}")
+            print(f"        Total cost: {total_cost_via_end:.2f}m, adjusted: {adjusted_cost_via_end:.2f}m")
+        
+        # Decision based on adjusted costs
+        if adjusted_cost_via_start <= adjusted_cost_via_end:
+            if debug:
+                print(f"      Decision: Start node {self.start_node} (better adjusted cost)")
             return self.start_node, distance_to_start
         else:
+            if debug:
+                print(f"      Decision: End node {self.end_node} (better adjusted cost)")
             return self.end_node, distance_to_end
 
 
@@ -658,7 +688,7 @@ class WaterwayRouteCalculator:
             
             # Follow edge geometry from waypoint to optimal node toward destination
             if start_distance > 0.1:  # Only add if not already on the edge
-                optimal_start_node, distance_to_start_node = start_edge.get_optimal_node_toward_destination(start_point, end_point)
+                optimal_start_node, distance_to_start_node = start_edge.get_optimal_node_toward_destination(start_point, end_point, self.graph, debug=True)
                 print(f"Following edge geometry from waypoint to node {optimal_start_node} ({distance_to_start_node:.2f}m) toward destination")
                 
                 # Get geometry from waypoint to closest point on edge, then along edge to optimal node
@@ -674,7 +704,7 @@ class WaterwayRouteCalculator:
                 start_node_for_pathfinding = optimal_start_node
             else:
                 # Already on the edge, find optimal node toward destination
-                optimal_start_node, distance_to_start_node = start_edge.get_optimal_node_toward_destination(start_point, end_point)
+                optimal_start_node, distance_to_start_node = start_edge.get_optimal_node_toward_destination(start_point, end_point, self.graph, debug=True)
                 print(f"Waypoint is on edge, using optimal node {optimal_start_node} ({distance_to_start_node:.2f}m) toward destination")
                 
                 # Follow edge geometry to the optimal node
@@ -698,7 +728,7 @@ class WaterwayRouteCalculator:
                 # Both points are on the same edge - we need to handle this specially
                 
                 # Find the optimal node for end point (toward start for reverse direction)
-                optimal_end_node, distance_to_end_node = end_edge.get_optimal_node_toward_destination(end_point, start_point)
+                optimal_end_node, distance_to_end_node = end_edge.get_optimal_node_toward_destination(end_point, start_point, self.graph, debug=True)
                 
                 # If both points use the same optimal node, connect directly along edge
                 if start_node_for_pathfinding == optimal_end_node:
