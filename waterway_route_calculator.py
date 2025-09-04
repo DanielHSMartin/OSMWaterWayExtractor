@@ -646,6 +646,9 @@ class WaterwayRouteCalculator:
             
             # Determine end node for pathfinding and handle final connection
             end_node_for_pathfinding = None
+            chosen_path = None
+            chosen_path_distance = 0.0
+            distance_to_end_node = 0.0
             
             if start_edge.id == end_edge.id:
                 print(f"Start and end points are on the same edge {start_edge.id}")
@@ -670,59 +673,51 @@ class WaterwayRouteCalculator:
                     end_node_for_pathfinding = nearest_end_node
             else:
                 print(f"Finding waterway path from edge {start_edge.id} to edge {end_edge.id}")
-                # Choose the better end node for pathfinding based on overall route efficiency
-                # Try both nodes and see which gives a better overall path
+                # Try both possible end nodes for pathfinding and choose the one that gives better overall route
                 start_node_coord = self.graph.nodes[start_node_for_pathfinding]
                 
-                # Get coordinates for both possible end nodes
-                end_option1_coord = self.graph.nodes[end_edge.start_node]
-                end_option2_coord = self.graph.nodes[end_edge.end_node]
+                # Option 1: Use start_node of end edge
+                option1_node = end_edge.start_node
+                option1_coord = self.graph.nodes[option1_node]
+                path1, path1_distance = self.graph.dijkstra(start_node_for_pathfinding, option1_node)
                 
-                # Calculate straight-line distances from start node to both end options
-                dist_to_option1 = start_node_coord.distance_to(end_option1_coord)
-                dist_to_option2 = start_node_coord.distance_to(end_option2_coord)
+                # Calculate edge distance from option1_node to end point
+                option1_edge_geometry, option1_edge_distance = end_edge.get_geometry_from_node(option1_node, end_point)
+                option1_total = path1_distance + option1_edge_distance if path1 else float('inf')
                 
-                # Calculate edge distances from end point to both end options
-                option1_edge_distance = 0.0
-                option2_edge_distance = 0.0
+                # Option 2: Use end_node of end edge  
+                option2_node = end_edge.end_node
+                option2_coord = self.graph.nodes[option2_node]
+                path2, path2_distance = self.graph.dijkstra(start_node_for_pathfinding, option2_node)
                 
-                closest_point, _, seg_idx, ratio = end_edge.get_closest_point_with_position(end_point)
+                # Calculate edge distance from option2_node to end point
+                option2_edge_geometry, option2_edge_distance = end_edge.get_geometry_from_node(option2_node, end_point)
+                option2_total = path2_distance + option2_edge_distance if path2 else float('inf')
                 
-                # Distance to start node (option 1) via edge
-                for i in range(seg_idx, 0, -1):
-                    curr_coord = end_edge.coordinates[i]
-                    prev_coord = end_edge.coordinates[i - 1]
-                    option1_edge_distance += haversine_distance(curr_coord[0], curr_coord[1], prev_coord[0], prev_coord[1])
-                if seg_idx > 0:
-                    segment_start = Point(end_edge.coordinates[seg_idx][0], end_edge.coordinates[seg_idx][1])
-                    option1_edge_distance += closest_point.distance_to(segment_start)
+                print(f"  Option 1 (start_node {option1_node}): pathfinding={path1_distance if path1 else 'NONE'}m + edge={option1_edge_distance:.2f}m = {option1_total:.2f}m")
+                print(f"  Option 2 (end_node {option2_node}): pathfinding={path2_distance if path2 else 'NONE'}m + edge={option2_edge_distance:.2f}m = {option2_total:.2f}m")
                 
-                # Distance to end node (option 2) via edge  
-                for i in range(seg_idx, len(end_edge.coordinates) - 1):
-                    curr_coord = end_edge.coordinates[i]
-                    next_coord = end_edge.coordinates[i + 1]
-                    option2_edge_distance += haversine_distance(curr_coord[0], curr_coord[1], next_coord[0], next_coord[1])
-                if seg_idx + 1 < len(end_edge.coordinates):
-                    segment_end = Point(end_edge.coordinates[seg_idx + 1][0], end_edge.coordinates[seg_idx + 1][1])
-                    option2_edge_distance += closest_point.distance_to(segment_end)
-                
-                # Choose the option that minimizes the overall route (pathfinding + edge distance)
-                total_option1 = dist_to_option1 + option1_edge_distance
-                total_option2 = dist_to_option2 + option2_edge_distance
-                
-                if total_option1 <= total_option2:
-                    nearest_end_node = end_edge.start_node
+                # Choose the better option
+                if option1_total <= option2_total and path1:
+                    print(f"  Using start_node {option1_node}: pathfinding={path1_distance:.2f}m + edge={option1_edge_distance:.2f}m = {option1_total:.2f}m")
+                    chosen_path = path1
+                    chosen_path_distance = path1_distance
+                    end_node_for_pathfinding = option1_node
                     distance_to_end_node = option1_edge_distance
-                else:
-                    nearest_end_node = end_edge.end_node
+                elif option2_total < float('inf') and path2:
+                    print(f"  Using end_node {option2_node}: pathfinding={path2_distance:.2f}m + edge={option2_edge_distance:.2f}m = {option2_total:.2f}m")
+                    chosen_path = path2
+                    chosen_path_distance = path2_distance
+                    end_node_for_pathfinding = option2_node
                     distance_to_end_node = option2_edge_distance
-                
-                end_node_for_pathfinding = nearest_end_node
+                else:
+                    print(f"  No valid pathfinding route found, falling back to disconnected routing")
+                    end_node_for_pathfinding = None
                 
             # If we have different edges or different nodes on same edge, do pathfinding
             if end_node_for_pathfinding is not None and start_node_for_pathfinding != end_node_for_pathfinding:
-                # Do pathfinding between the nodes
-                path, path_distance = self.graph.dijkstra(start_node_for_pathfinding, end_node_for_pathfinding)
+                # Use the pre-computed optimal path
+                path, path_distance = chosen_path, chosen_path_distance
                 if path and len(path) > 1:
                     print(f"  Found waterway path: {len(path)} nodes, {path_distance:.2f}m")
                     path_geometry = self.graph.get_path_geometry(path)
@@ -796,6 +791,13 @@ class WaterwayRouteCalculator:
         print(f"Total distance: {total_distance:.2f}m")
         print(f"Total geometry points: {len(all_geometry)}")
         print(f"Route segments: {len(route_segments)}")
+        
+        # Remove backtracking patterns
+        print(f"Removing backtracking patterns...")
+        cleaned_geometry = self.remove_backtracking(all_geometry)
+        if len(cleaned_geometry) < len(all_geometry):
+            print(f"Removed {len(all_geometry) - len(cleaned_geometry)} backtracking coordinates")
+            all_geometry = cleaned_geometry
         
         return {
             'type': 'route_calculation_result',
@@ -1049,6 +1051,44 @@ class WaterwayRouteCalculator:
             })
         
         return route_segments, final_handled
+    
+    def remove_backtracking(self, geometry: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """Remove obvious backtracking patterns from route geometry."""
+        if len(geometry) < 3:
+            return geometry
+        
+        # Look for patterns where we go A->B->A (or close to A)
+        cleaned_geometry = [geometry[0]]
+        
+        i = 1
+        while i < len(geometry):
+            current_point = Point(geometry[i][0], geometry[i][1])
+            
+            # Look ahead to see if we return close to a previous point
+            backtrack_detected = False
+            for j in range(i + 1, min(i + 50, len(geometry))):  # Look ahead up to 50 points
+                future_point = Point(geometry[j][0], geometry[j][1])
+                
+                # Check if future point is close to any of the last 10 points we added
+                for k in range(max(0, len(cleaned_geometry) - 10), len(cleaned_geometry)):
+                    past_point = Point(cleaned_geometry[k][0], cleaned_geometry[k][1])
+                    
+                    # If future point is very close to a past point, we have backtracking
+                    if future_point.distance_to(past_point) < 50:  # Within 50 meters
+                        # Skip the backtracking section
+                        print(f"  Detected backtracking: skipping {j - i} coordinates")
+                        i = j
+                        backtrack_detected = True
+                        break
+                
+                if backtrack_detected:
+                    break
+            
+            if not backtrack_detected:
+                cleaned_geometry.append(geometry[i])
+                i += 1
+        
+        return cleaned_geometry
     
     def create_geojson_output(self, route_result: Dict, waypoints: List[Point]) -> Dict:
         """Create GeoJSON output for the calculated route."""
