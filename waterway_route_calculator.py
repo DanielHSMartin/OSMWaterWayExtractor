@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.9-original-algorithm"
+SCRIPT_VERSION = "2.1.10-multi-candidate-destination"
 
 import json
 import gzip
@@ -429,29 +429,101 @@ class WaterwayGraph:
             self.adjacency_list[start].append((end, edge.length, i))
             self.adjacency_list[end].append((start, edge.length, i))
     
-    def find_closest_edge(self, point: Point) -> Tuple[Edge, Point, float]:
-        """Find the closest edge to the given point."""
+    def find_closest_edges(self, point: Point, max_edges: int = 5, max_distance: float = 5000.0) -> List[Tuple[Edge, Point, float]]:
+        """Find the closest edges to the given point, returning up to max_edges within max_distance."""
         if not self.edges:
             raise ValueError("No edges available in the graph")
         
-        min_distance = float('inf')
-        closest_edge = self.edges[0]  # Initialize with first edge
-        closest_point_on_edge = Point(0.0, 0.0)  # Will be overwritten
+        edge_distances = []
         
         print(f"  Searching through {len(self.edges)} edges for closest to ({point.lat:.6f}, {point.lon:.6f})")
         
         for edge in self.edges:
             edge_closest_point, distance = edge.get_closest_point_on_edge(point)
             
-            if distance < min_distance:
-                min_distance = distance
-                closest_edge = edge
-                closest_point_on_edge = edge_closest_point
+            if distance <= max_distance:
+                edge_distances.append((edge, edge_closest_point, distance))
         
-        print(f"  Found closest edge {closest_edge.id} at distance {min_distance:.2f}m")
-        print(f"  Closest point on edge: ({closest_point_on_edge.lat:.6f}, {closest_point_on_edge.lon:.6f})")
+        # Sort by distance and take the top max_edges
+        edge_distances.sort(key=lambda x: x[2])
+        result = edge_distances[:max_edges]
         
-        return closest_edge, closest_point_on_edge, min_distance
+        print(f"  Found {len(result)} candidate edges within {max_distance:.0f}m")
+        for i, (edge, closest_point, distance) in enumerate(result):
+            print(f"    {i+1}: Edge {edge.id} at distance {distance:.2f}m")
+        
+        return result
+    
+    def find_closest_edge(self, point: Point) -> Tuple[Edge, Point, float]:
+        """Find the closest edge to the given point."""
+        closest_edges = self.find_closest_edges(point, max_edges=1)
+        if closest_edges:
+            edge, closest_point, distance = closest_edges[0]
+            print(f"  Found closest edge {edge.id} at distance {distance:.2f}m")
+            print(f"  Closest point on edge: ({closest_point.lat:.6f}, {closest_point.lon:.6f})")
+            return edge, closest_point, distance
+        else:
+            raise ValueError("No edges found")
+    
+    def find_optimal_destination_edge(self, start_edge: Edge, start_point: Point, destination_point: Point) -> Tuple[Edge, Point, float]:
+        """Find the destination edge that gives the best overall route from start_edge."""
+        # Get multiple candidate destination edges
+        candidate_edges = self.find_closest_edges(destination_point, max_edges=3, max_distance=2000.0)
+        
+        if not candidate_edges:
+            print("  No candidate edges found, falling back to closest edge search")
+            return self.find_closest_edge(destination_point)
+        
+        # For each candidate, calculate the total route cost
+        best_edge = None
+        best_point = None
+        best_distance = None
+        best_total_cost = float('inf')
+        
+        # Get the starting node for pathfinding
+        start_node, _ = start_edge.get_optimal_node_toward_destination(start_point, destination_point, self, debug=False)
+        
+        print(f"  Evaluating {len(candidate_edges)} candidate destination edges:")
+        
+        for i, (candidate_edge, candidate_point, edge_distance) in enumerate(candidate_edges):
+            # Try both nodes of the candidate edge
+            option1_node = candidate_edge.start_node
+            option2_node = candidate_edge.end_node
+            
+            # Calculate pathfinding cost to each node
+            path1, path1_distance = self.dijkstra(start_node, option1_node)
+            path2, path2_distance = self.dijkstra(start_node, option2_node)
+            
+            # Calculate edge costs from each node to destination point
+            try:
+                option1_edge_geometry, option1_edge_distance = candidate_edge.get_geometry_from_node(option1_node, destination_point)
+                option2_edge_geometry, option2_edge_distance = candidate_edge.get_geometry_from_node(option2_node, destination_point)
+            except:
+                # Skip this candidate if edge geometry calculation fails
+                print(f"    Candidate {i+1} (Edge {candidate_edge.id}): Skipped due to geometry calculation error")
+                continue
+            
+            # Total costs for each option
+            option1_total = (path1_distance if path1 else float('inf')) + option1_edge_distance + edge_distance
+            option2_total = (path2_distance if path2 else float('inf')) + option2_edge_distance + edge_distance
+            
+            # Choose the better option for this candidate edge
+            candidate_total_cost = min(option1_total, option2_total)
+            
+            print(f"    Candidate {i+1} (Edge {candidate_edge.id}): total_cost={candidate_total_cost:.2f}m (edge_dist={edge_distance:.2f}m)")
+            
+            if candidate_total_cost < best_total_cost:
+                best_total_cost = candidate_total_cost
+                best_edge = candidate_edge
+                best_point = candidate_point
+                best_distance = edge_distance
+        
+        if best_edge:
+            print(f"  Selected edge {best_edge.id} with total cost {best_total_cost:.2f}m")
+            return best_edge, best_point, best_distance
+        else:
+            print("  No valid candidate found, falling back to closest edge")
+            return self.find_closest_edge(destination_point)
     
     def dijkstra(self, start_node: int, end_node: int) -> Tuple[List[int], float]:
         """Find shortest path between two nodes using Dijkstra's algorithm."""
@@ -655,8 +727,8 @@ class WaterwayRouteCalculator:
             print(f"Finding closest edge to start point ({start_point.lat:.6f}, {start_point.lon:.6f})")
             start_edge, start_point_on_edge, start_distance = self.graph.find_closest_edge(start_point)
             
-            print(f"Finding closest edge to end point ({end_point.lat:.6f}, {end_point.lon:.6f})")
-            end_edge, end_point_on_edge, end_distance = self.graph.find_closest_edge(end_point)
+            print(f"Finding optimal destination edge for end point ({end_point.lat:.6f}, {end_point.lon:.6f})")
+            end_edge, end_point_on_edge, end_distance = self.graph.find_optimal_destination_edge(start_edge, start_point, end_point)
             
             # Check if we need to connect to the waterway network
             segment_geometry = []
