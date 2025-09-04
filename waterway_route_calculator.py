@@ -17,7 +17,7 @@ Features:
 """
 
 # Version identifier for tracking script updates
-SCRIPT_VERSION = "2.1.6-fix-optimal-node-selection"
+SCRIPT_VERSION = "2.1.5-fix-direction-selection"
 
 import json
 import gzip
@@ -329,12 +329,9 @@ class Edge:
         start_to_dest_direct = start_node_coord.distance_to(destination)
         end_to_dest_direct = end_node_coord.distance_to(destination)
         
-        # Choose the node that provides the best overall route efficiency toward destination
-        # This considers both the distance along the edge and the straight-line distance to destination
-        total_cost_via_start = distance_to_start + start_to_dest_direct
-        total_cost_via_end = distance_to_end + end_to_dest_direct
-        
-        if total_cost_via_start <= total_cost_via_end:
+        # Choose the node that provides the best overall direction toward destination
+        # This considers both the distance along the edge and the direction toward the destination
+        if start_to_dest_direct < end_to_dest_direct:
             return self.start_node, distance_to_start
         else:
             return self.end_node, distance_to_end
