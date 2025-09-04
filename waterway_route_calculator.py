@@ -518,12 +518,13 @@ class WaterwayGraph:
                 best_point = candidate_point
                 best_distance = edge_distance
         
-        if best_edge:
+        if best_edge and best_point is not None and best_distance is not None:
             print(f"  Selected edge {best_edge.id} with total cost {best_total_cost:.2f}m")
             return best_edge, best_point, best_distance
         else:
             print("  No valid candidate found, falling back to closest edge")
-            return self.find_closest_edge(destination_point)
+            edge, point, distance = self.find_closest_edge(destination_point)
+            return edge, point, distance
     
     def dijkstra(self, start_node: int, end_node: int) -> Tuple[List[int], float]:
         """Find shortest path between two nodes using Dijkstra's algorithm."""
